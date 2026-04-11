@@ -142,10 +142,7 @@ this <B1> opcode encodes current OUTPUT levels
 */
 
 			{//scope block
-				//2026-03-30 new
-				//nsWiThrottle::relayLocoNetMessage(msgCopy);
-
-
+				
 				//Digitrax DS54 address logic. SN1,2 hold A10-A0, left shift these and append SN2<5> as lsb A0, giving 12 bits
 				//this logic needs to go into the ESPACC
 
@@ -153,8 +150,12 @@ this <B1> opcode encodes current OUTPUT levels
 				addr = addr << 1;
 				addr += (tokens[2] & 0b100000) == 0 ? 0 : 1;
 				addr++;  //DCC addresses start at 1, range 1-4096
-				trace(Serial.printf("sensor a=%d\n", addr);)
+				
+					if (nsESPaccessory::getVerbose()) {
+						Serial.printf("sensor %d\n", addr);
+					};
 
+				//call out to the hardware
 					
 			}
 
@@ -178,17 +179,26 @@ this <B1> opcode encodes current OUTPUT levels
 			e.g. throw+poweron then throw+poweroff
 			*/
 
-
 			uint16_t addr = tokens[1];
 			addr += (tokens[2] & 0x0F) << 8;
-			/*2026-02-05 deprecated, we now use actionAccessoryFromLocoNet()
-			bool closed = (tokens[2] & 0b00100000) == 0 ? false : true;
+			addr++;  //loconet address 0 is DCC address 1
+						
+			bool thrown = (tokens[2] & 0b00100000) == 0 ? true : false;
 			bool onState = (tokens[2] & 0b00010000) == 0 ? false : true;
-			writeTurnout(addr, closed, onState);  //DEPRECATED
-			*/
 
-			//actionAccessoryFromLocoNet(addr, (tokens[2] & 0b00100000) == 0 ? true : false, (tokens[2] & 0b00010000) == 0 ? false : true);
+			if (nsESPaccessory::getVerbose) {
+				//snprintf(buf, 5, "%02X", );
+				if (thrown) {
+					Serial.printf("Turnout %d thrown\n", addr);
+				}
+				else {
+					Serial.printf("Turnout %d closed\n", addr);
+				}
+			}
 
+
+			//only respond to the onState version of the command
+			if (onState) nsESPaccessory::commandTurnout(addr, thrown);
 		}
 		return;
 	}//end 4 token block
@@ -217,7 +227,9 @@ this <B1> opcode encodes current OUTPUT levels
 
 		uint8_t payloadLength = (tokens[3] & 0b111000) >> 4;
 		uint8_t repeats = tokens[3] & 0b11;  //zero means no repeats, i.e. one transmission
-		//now build a payload array
+
+		//now build a payload array, note that locoNet data bytes are only 7bits so we need to recover the msb from
+		//the DHI byte
 		uint8_t payload[5];
 		for (int i = 0;i < 5;i++) {
 			payload[i] = tokens[5 + i];
@@ -225,31 +237,28 @@ this <B1> opcode encodes current OUTPUT levels
 			payload[i] += (tokens[4] & (1 << i)) != 0 ? 0x80 : 0;
 		}
 
-		//actionDCCpacketFromLocoNet(payload, payloadLength, repeats);
-
 		//note that the Extended Accessory Decoder specification is found here, and is updated as of 2025
 		//https://www.nmra.org/sites/default/files/standards/sandrp/DCC/S/s-9.2.1_dcc_extended_packet_formats.pdf
 		//{preamble} 0 10AAAAAA 0 0BBB0AA1 0 XXXXXXXX 0 EEEEEEEE 1
 		//byte 1 is A<7-2> byte 2 BBB=A<10-8> 1s compliment, AA=A<1-0>  and byte 3 is a full 8-bit payload
 
-		
-
-		/*2026-03-30 deprecated
 				//addr is wrong!  33 dcc (offset checked) generates 36 in addr var
 				//ED 0B 7F 32 01   09 71 15 00 00 38   should give 33 true dcc.
-				//we do need to decode it to send as a JSON message to the ESPaccessory controller
 				uint16_t addr = payload[1]>>4;  //BBB part
 				addr ^= 0b111; //1's compliment
 				addr = addr << 6; //move to <10-8> posn
 				addr += (payload[0] & 0b111111); //add <7-2>
 				addr = addr << 2;
 				addr += ((payload[1] & 0b110) >> 1);  //add <1-0>
+				addr++;  //Loconet starts at zero, DCC starts at 1
 				//%.0f is decimal no dp, %02X is hex
-				snprintf(buf, 5, "%02X", payload[2]);
-				//nsDCCweb::broadcastLocoNetCommand("MAS", addr, buf);
-				trace(Serial.printf("MAS %d %s\n", addr, buf);)
-				//Serial.println("booya");
-				*/
+				if (nsESPaccessory::getVerbose) {
+					snprintf(buf, 5, "%02X", payload[2]);
+					Serial.printf("MAS %d %s\n", addr, buf);
+				}
+
+				nsESPaccessory::commandMAS(addr, payload[2]);
+
 
 				//final respone is LACK=<B4>,<7D>,<7F>,<chk> if CMD ok
 		nsESPaccessory::queueMessage("RECEIVE 0xB4 0x7D 0x7F 0x49\n");

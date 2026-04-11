@@ -16,13 +16,19 @@
 #include <vector>
 #include "LocoNetAccessoryProcessor.h"
 
+
+
 namespace nsESPaccessory {
 
 	void ESPaccessoryLoop();
 	void ESPaccessorySetup();
 	bool queueMessage(std::string s);
-	
-	
+	bool getVerbose(void);
+
+	void commandTurnout(int16_t addr, bool thrown);
+	void commandMAS(int16_t addr, uint8_t state);
+	bool pollSensor(int16_t addr);
+
 }
 
 #endif
