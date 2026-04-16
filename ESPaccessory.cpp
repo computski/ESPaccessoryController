@@ -55,11 +55,36 @@ Avoid GPIO 0, 1, and 15, which are used for booting.
 So... when it comes to PWM support, maybe I don't use Servo.h and instead use the PCA breakout board 
 this way we reserve the ESP for sensor inputs and tristate led drivers
 
+
+
+good idea to use BANKS, with bank 0 is the NodeMCU, bank1 is the first PCA and bank2 the second PCA
+each PCA can then have 16 pins
+
+NodeMCU hardware SZDOIT board
+https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
+D0 GPIO16
+D1 GPIO5 PWMA
+D2 GPIO4 PWMB
+D3 GPIO0 dir A (WPU, flash button, boot fails if low)
+D4 GPIO2 dir B (WPU, boot fails if low)
+D5 GPIO14 
+D6 GPIO12
+D7 GPIO13
+D8 GPIO15 (WPD, boot fails if hi)
+
+Assuming you use active pull down sensors, then all pins bar D8 can host a sensor
+The A0 analog input could also house a sensor.
+
+So BANK0 CAN HAVE 9 io pins, we will map them as 0 through 8 to mirror the nodemcu naming
+on the PCA9685 device it will be pins 0-15
+
+
+
 */
 
 
-
-
+const char NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
+void processServo(void);
 
 
 
@@ -67,7 +92,7 @@ this way we reserve the ESP for sensor inputs and tristate led drivers
 
 
 #include "ESPaccessory.h"
-//#include <Servo.h>
+//#include <Servo.h>  //not using it
 
 extern "C" {
 #include <osapi.h>
@@ -90,7 +115,7 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260412;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260403;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.1\0";   //note the actual setting requires comma separators
@@ -124,11 +149,8 @@ bool ledState = true;
 
 static os_timer_t hearbeatTimer;
 
-static os_timer_t watchdogTimer;
-#define WATCHDOG_TIMEOUT 120000  //two minutes
-
-//os_timer_disarm(&watchdogTimer);   we need some code that will periodically reset the WDT before it times out
-//os_timer_arm(&watchdogTimer, WATCHDOG_TIMEOUT, true);
+static os_timer_t servoTimer;
+#define SERVO_TIMEOUT 15  //15ms
 
 
 static uint8_t deviceState = S_BOOT;
@@ -141,8 +163,8 @@ static os_timer_t payloadTimer;
 
 
 //++++++++++++++++++++ TURNOUTS, SIGNALS AND SENSORS ++++++++++++++++++++++++++++++++++++++++++++++
-#define TOTAL_PINS 10
-#define BASE_PIN 3
+#define TOTAL_PINS 9
+#define BASE_PIN 0
 #define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
 #define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
 
@@ -183,7 +205,7 @@ struct VIRTUALSERVO {
 //virtual servo objects
 VIRTUALSERVO virtualservoCollection[TOTAL_PINS];
 
-//servo drivers. This library creates a servo driver (pulse posn modulation) for each of the arduino pins
+//servo drivers. This library creates a servo driver (pulse posn modulation) for each of the IO pins
 //Servo servoDriver[TOTAL_PINS];
 
 //function declaraions
@@ -222,7 +244,6 @@ void eeGetSettings(void);
 void eePutSettings(void);
 void checkSerial(void);
 static void sendEnqueuedMessages();
-static void watchdogFail(void);
 
 //cannot put this in the header and then expect to use it in another namespace as it will cause a compiler error
 //instead we have to return its value via a function
@@ -269,18 +290,11 @@ void nsESPaccessory::ESPaccessorySetup() {
 	verbose = true;
 
 
-	pinMode(16, OUTPUT);
+	//pinMode(16, OUTPUT);  LED sits on D0
 
 	deviceState = S_BOOT;
 	
 	
-	//to protect against Wifi hangups and loss of TCP, start watchdog now
-
-	//https://sub.nanona.fi/esp8266/hello-world.html
-	os_timer_setfn(&watchdogTimer, (os_timer_func_t*)watchdogFail, NULL);
-	//os_timer_arm(&watchdogTimer, WATCHDOG_TIMEOUT, true);  //2026-04-11 do not use
-
-
 thing:
 	// connects to access point
 	WiFi.mode(WIFI_STA);
@@ -307,6 +321,10 @@ thing:
 	bootTCP();
 
 
+	//https://sub.nanona.fi/esp8266/hello-world.html
+	os_timer_setfn(&servoTimer, (os_timer_func_t*)processServo, NULL);
+	os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
+
 }
 
 
@@ -322,7 +340,7 @@ void nsESPaccessory::ESPaccessoryLoop() {
 	case S_TCP_CONNECTED:
 		//flash led 0.2 sec on, 5 off
 		if (currentMillis - previousMillis >= interval) {
-			digitalWrite(16, ledState);  //led is active low, false=on
+	//		digitalWrite(16, ledState);  //led is active low, false=on    DEBUG disable
 			interval = ledState ? 5000 : 200;
 			ledState = !ledState;
 			previousMillis = currentMillis;
@@ -338,7 +356,7 @@ void nsESPaccessory::ESPaccessoryLoop() {
 		//we kicked off ONE new attempt at a connect
 		//flash led 1 sec on/off
 		if (currentMillis - previousMillis >= 1000) {
-			digitalWrite(16, ledState);
+			//digitalWrite(16, ledState);
 			ledState = !ledState;
 			previousMillis = currentMillis;
 
@@ -376,6 +394,16 @@ void nsESPaccessory::ESPaccessoryLoop() {
 
 	checkSerial();
 	sendEnqueuedMessages();
+
+	
+
+
+
+
+
+
+
+
 
 }// end main loop
 
@@ -621,9 +649,9 @@ void checkSerial(void) {
 					if (vs.pin == vsParse.pin) {
 						//clear vsParse.aspectParameters to MAS_EMPTY_VAL, as this array is only used by multi aspect signals
 						memset(vsParse.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-					//	vsParse.thisDriver = vs.thisDriver;
+	//					vsParse.thisDriver = vs.thisDriver;
 						vs = vsParse;  //copy over from vsParse
-					//	if (vs.thisDriver->attached()) vs.thisDriver->detach();   
+		//				if (vs.thisDriver->attached()) vs.thisDriver->detach();   
 												
 						//write to EEPROM
 						bootController.isDirty = true;
@@ -1452,7 +1480,7 @@ bool nsESPaccessory::pollSensor(int16_t addr) { return true; }
 
 
 
-
+const int EEOFFSET = 192;
 
 /// <summary>
 /// restores settings from EEPROM. If the software version has changed, we overwrite the eeprom with defaults
@@ -1471,9 +1499,9 @@ void eeGetSettings(void) {
 		factory = true;
 		EEPROM.put(0, defaultController);
 		//eeAddr += sizeof(defaultController);
-		eeAddr = 192; //bug fix
+		eeAddr = EEOFFSET; //bug fix
 
-		/*use pin 4 onward. set defaults*/
+		//set defaults
 		int p = BASE_PIN;
 		for (auto& vs : virtualservoCollection) {
 			vs.pin = p;
@@ -1496,16 +1524,16 @@ void eeGetSettings(void) {
 		eeAddr = 0;
 		EEPROM.get(eeAddr, bootController);
 		//eeAddr += sizeof(bootController);
-		eeAddr = 32; //bug fix
+		eeAddr = EEOFFSET; //bug fix
 		EEPROM.get(eeAddr, virtualservoCollection);
 		eeAddr += sizeof(virtualservoCollection);
 		Serial.print(F("EEPROM="));
 		Serial.println(eeAddr, DEC);
 
-		//initialise the pin assignments 4 onwards move all servos and aspects to closed position
-		int p = BASE_PIN;
+		//initialise the pin assignments move all servos and aspects to closed position
 		int i = 0;
-
+		int p = BASE_PIN;
+		
 		for (auto& vs : virtualservoCollection) {
 			vs.pin = p;
 			vs.state = SERVO_BOOT;
@@ -1529,10 +1557,8 @@ void eeGetSettings(void) {
 			vs.address &= 0xFFF;
 
 
-			//initialise the servo driver
-				//servoDriver[i].attach(p);
-				//servoDriver[i].write(s.position);
-				//2020-11-09 we don't want to attach at this time as it will asert an unhelpful position
+			//Servo.h for the ESP12 needs to be fed the GPIO reference, all we are doing here is associating 
+			//each servoDriver with its virtualServo parent
 			//servoDriver[i].detach();
 			//vs.thisDriver = &servoDriver[i];
 			++p;
@@ -1552,7 +1578,7 @@ void eePutSettings(void) {
 	int eeAddr = 0;
 	EEPROM.put(eeAddr, bootController);
 	eeAddr += sizeof(bootController);  //is approx 128 bytes
-	eeAddr = 192;  //bug fix, to be safe, move to a higher block
+	eeAddr = EEOFFSET;  //bug fix, to be safe, move to a higher block
 
 	EEPROM.put(eeAddr, virtualservoCollection);
 	eeAddr += sizeof(virtualservoCollection);
@@ -1561,7 +1587,7 @@ void eePutSettings(void) {
 	bootController.isDirty = false;
 }
 
-
+/*
 static void watchdogFail(void) {
 	Serial.println(F("watchdog TIMEOUT\n"));
 	delayMicroseconds(1000);
@@ -1575,6 +1601,7 @@ static void watchdogFail(void) {
 	//to renable it a reboot is required
 	os_timer_disarm(&watchdogTimer);
 }
+*/
 
 #pragma endregion
 
@@ -1715,6 +1742,174 @@ bool nsESPaccessory::getVerbose(void) {
 
 
 
+//PROCESS SERVO POSITIONS AND SIGNAL ASPECTS
+
+void processServo(void) {
+	static VIRTUALSERVO* vsBoot = nullptr;
+	static uint8_t bootTimer = 0;
+	
+	//IMPORTANT: vs.pin does represent the GPIO pin and not the ordinal in the virtualServoCollection
 
 
+	//1 sec count block here
+	MAScommandSync = true;
+
+	//in normal non-invert mode, minPosition is turnout closed, and maxPosition is turnout thrown
+	//for signal aspects, we move from ASPECT_CLOSED or ASPECT_THROWN straight to the antiphase, and we heed the .power parameter
+
+	for (auto& vs : virtualservoCollection) {
+		uint8_t maxPosition = vs.swing + 90;
+		uint8_t minPosition = 90 - vs.swing;
+		uint8_t gpioPin = NodeMCUmap[vs.pin];
+
+		//Servo rotation rates. +ve rate values will speed up movement by increasing the movement increment above 1
+		uint8_t increment = vs.rate > 0 ? vs.rate : 1;
+		//.timeDelay is used for -ve rate values
+		vs.timeDelay += vs.timeDelay < 0 ? 1 : 0;
+		
+
+		switch (vs.state) {
+		case SERVO_NEUTRAL:
+			vs.position = 90;
+		//	if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+			break;
+
+		case SERVO_TO_CLOSED:
+			//-ve rotation rate values will slow down movement
+			if (vs.timeDelay != 0) break;
+			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
+
+			//swing toward minPosition, unless invert is true
+			if (vs.invert) {
+				vs.position += vs.position < maxPosition ? increment : 0;
+			}
+			else {
+				vs.position -= vs.position > minPosition ? increment : 0;
+			}
+
+			if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+				vs.state = SERVO_CLOSED;
+			}
+
+		//	if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+			break;
+
+		case SERVO_TO_THROWN:
+			//-ve roation rate values will slow down movement
+			if (vs.timeDelay != 0) break;
+			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
+
+			//swing toward maxPosition unless invert is true
+			if (vs.invert) {
+				vs.position -= vs.position > minPosition ? increment : 0;
+			}
+			else {
+				vs.position += vs.position < maxPosition ? increment : 0;
+			}
+
+			if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+				vs.state = SERVO_THROWN;
+			}
+
+			//if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+			break;
+
+		case SERVO_THROWN:
+			vs.position = vs.invert ? minPosition : maxPosition;
+		//	if ((vs.thisDriver->attached()) && (!vs.continuous)) {
+			//	vs.thisDriver->detach();
+			//}
+			break;
+		case SERVO_CLOSED:
+			vs.position = vs.invert ? maxPosition : minPosition;
+		//	if ((vs.thisDriver->attached()) && (!vs.continuous)) {
+				//vs.thisDriver->detach();
+		//	}
+			break;
+
+		case ASPECT_CLOSED:
+			if ((vs.power) || (vs.ignorePowerParameter)) {
+				//actively drive the pin. Thrown is a high state unless invert is active
+				pinMode(gpioPin, OUTPUT);
+				digitalWrite(gpioPin, vs.invert ? HIGH : LOW);
+			}
+			else {
+				//pin to tri-state
+				pinMode(gpioPin, INPUT);
+			}
+			break;
+
+		case ASPECT_THROWN:
+			if ((vs.power) || (vs.ignorePowerParameter)) {
+				//actively drive the pin. Thrown is a high state unless invert is active
+				pinMode(gpioPin, OUTPUT);
+				digitalWrite(gpioPin, vs.invert ? LOW : HIGH);
+			}
+			else {
+				//pin to tri-state
+				pinMode(gpioPin, INPUT);
+			}
+			break;
+
+
+		case ASPECT_MULTIPLE:
+			// MAScommandSync is set by an LEDstate edge, thus synchronising all changes with the master LED clock.
+			// this prevents short-duration flashses when changing to one of the MAS flashing aspects
+			if (MAScommandSync) assertMASoutput(vs);
+			break;
+
+		case SERVO_BOOT:
+			if (vsBoot == nullptr) {
+				//handle next-up servo to boot. servos are booted in the CLOSED position
+				//and aspects are booted with POWER=off
+				vsBoot = (VIRTUALSERVO*)&vs;
+				bootTimer = 34;
+				if (vs.isServo) {
+					vs.position = vs.invert ? maxPosition : minPosition;
+					//if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+					//vs.thisDriver->write(vs.position);
+				}
+				else {
+					//aspect. Immediately go to closed state with power off
+					vs.power = false;
+					vs.state = isMASdevice(vs) ? ASPECT_MULTIPLE : ASPECT_CLOSED;
+					vsBoot = nullptr;
+					bootTimer = 0;
+					//vs.thisDriver->detach();
+				}
+
+			}
+			else if (vsBoot == (VIRTUALSERVO*)&vs) {
+				//if this is the current boot-servo, then decrement bootTimer
+				bootTimer -= bootTimer > 0 ? 1 : 0;
+
+				//timed out?
+				if (bootTimer == 0) {
+					vs.state = SERVO_CLOSED;
+					Serial.print(F("pin booted"));
+					Serial.println(vs.pin, DEC);
+					//release for next vs to boot
+					vsBoot = nullptr;
+				}
+			}
+			break;
+		}
+
+		//update the servo position every 15mS
+		//if (vs.thisDriver) vs.thisDriver->write(vs.position);    ///BUG writing this causes a WDT soft reset.  I think it is likely interfering with the WiFi
+	}
+
+	//NOW we have a wdt reset; we generate PWM and connect to wifi but after pin booted0 appears, the unit locks up and hits a wdt reset and does not respond to 
+	// serial either.
+	
+
+
+}
+
+
+//2026-04-14 give up on servo support.   The nodeMCU has 3v3 outputs, and so the breakoutboard servo pin connectors are all 3v3
+//there's not enough power available from the 3v3 regulator.
+//and it seems the Servo library will cause soft WDT timeouts if you write(vs.position) for all the servos every 15mS.
+//I think signals with tristate is still viable and infact on 3v3 is a good thing.  But servos are off the agenda as the SZDOIT board does not 
+//put 5v on the JST connector common rail.   I could write my own low-level int PWM code, but this does not fix the SZDOIT board problem
 

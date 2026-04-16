@@ -79,6 +79,7 @@
       <FileType>CppCode</FileType>
       <DeploymentContent>true</DeploymentContent>
     </ClCompile>
+    <ClCompile Include="ESPservo.cpp" />
     <ClCompile Include="LocoNetAccessoryProcessor.cpp">
       <SubType>
       </SubType>
@@ -86,6 +87,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ESPaccessory.h" />
+    <ClInclude Include="ESPservo.h" />
     <ClInclude Include="LocoNetAccessoryProcessor.h">
       <SubType>
       </SubType>

@@ -14,6 +14,7 @@
 */
 
 
+#include "ESPservo.h"
 #include "ESPaccessory.h"
 //#include "LocoNetAccessoryProcessor.h"
 
@@ -26,6 +27,7 @@ and all the code is moved into modules with their own cpp and hpp headers*/
 using namespace nsESPaccessory;
 
 void setup() {
+	ESPservoInit();
 	ESPaccessorySetup();
 }
 
