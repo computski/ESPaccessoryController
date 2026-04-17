@@ -115,7 +115,7 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260403;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260404;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.1\0";   //note the actual setting requires comma separators
