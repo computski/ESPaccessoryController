@@ -28,6 +28,7 @@ namespace nsESPaccessory {
 	void commandTurnout(int16_t addr, bool thrown);
 	void commandMAS(int16_t addr, uint8_t state);
 	bool pollSensor(int16_t addr);
+	
 
 }
 

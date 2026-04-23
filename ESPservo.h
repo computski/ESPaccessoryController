@@ -11,16 +11,16 @@
 
 //struct to model servo GPIO posn and IO state
 struct SERVO {
-	int8_t position;     //swing angle -90 to +90
 	uint16_t hiPulseLen;  //calculated high pulse len in ticks
 	uint8_t gpioPin;	//the assigned GPIO
 	bool isAttached;	//attach/detach
 };
 
-volatile static SERVO servoPool[9];  //9 pins
 
 void ESPservoInit();
-
-
+void ESPservoDebug();
+void ESPservoWrite(uint8_t pin, uint8_t position);
+void ESPservoAttach(uint8_t pin, bool isAttached);
+bool ESPservoIsAttached(uint8_t pin);
 #endif
 

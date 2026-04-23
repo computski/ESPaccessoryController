@@ -11,7 +11,7 @@ T=set TCP server IP
 P=set TCP server port
 D=dump param buffer
 R=reboot
-M=mode;
+M=mode;  //toggles client or server
 X=dump WIFI and server params
 V = verbose
 
@@ -44,16 +44,22 @@ VERBOSE command is: v, this will dump loconet messages to serial. reverts to ver
 
 /*
 BUGS
-the thing hits a soft WDT even before Wifi connects.  possibly this is servo.h
-causing a problem
-Yes, Servo.h works with the ESP8266/ESP-12, but it requires the dedicated ESP8266 board package,
-not the standard Arduino AVR library. Use PWM-capable GPIO pins (like D2 or D4)
+2026-04-19 set pin 1 as sensor but it seems to be driving a low as an output
+maybe the int routine?
+maybe its the write position routine?
 
-And not all ESP pins can support PWM. GPIO 4 (D2) or GPIO 2 (D4) are generally recommended. 
-Avoid GPIO 0, 1, and 15, which are used for booting.
+2026-04-21 i also still have the problem that pin 0 (GPIO 16) is stuck low.  why? [it boots hi]
 
-So... when it comes to PWM support, maybe I don't use Servo.h and instead use the PCA breakout board 
-this way we reserve the ESP for sensor inputs and tristate led drivers
+2026-04-22 more weird bugs.  D0 won't show any pwm, and D4 is high but when triggered it shows negative blips but not proper pwm
+there are possibly some hw limitations, but surely pins like D4 can be driven low?
+D4 is connected to the on-module LED.  (D0 is connected to the motherboard LED)
+
+D0 has a pullup via LED. D3 and D4 have 12k pullups.  D8 has a 12k pulldown
+but D3 works just fine and is idle low... but D4 stays high and if you keep the driver attached you see no pwm (or the pulse time is too long)
+very odd.
+
+
+
 
 
 
@@ -82,22 +88,21 @@ on the PCA9685 device it will be pins 0-15
 
 */
 
+#include "ESPaccessory.h"
+#include "ESPservo.h"
+#include <stdint.h>
 
-const char NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
+
+
+
+const uint8_t NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
+//5,4 are commonly used for SCL,SDA on I2C
 void processServo(void);
 
 
 
 
 
-
-#include "ESPaccessory.h"
-//#include <Servo.h>  //not using it
-
-extern "C" {
-#include <osapi.h>
-#include <os_type.h>
-}
 
 
 #define TRACE
@@ -115,19 +120,27 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260404;  //yyyymmdd captured as an integer
-	char AP_SSID[21] = "ESPACC";   //local SSID
+	long softwareVersion = 20260409;  //yyyymmdd captured as an integer
+	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.1\0";   //note the actual setting requires comma separators
 	char STA_SSID[21] = "Ossonet\0";  //SSID when running as a station on an external WiFi network
 	char STA_pwd[21] = "11223344AA\0";			//pwd for station
 	char tcpIP[17] = "192.168.1.118\0";   //target IP of CONTROLLER to connect to
 	uint16_t tcpPort = 1234;       //tcp port
-	char relayMode[3] = "R1";  //R denotes relay, K kiosk. 1|0 denotes watchdog enabled|off
+	char Mode[2] = "C";  //C denotes client, S server and L as standalone wifi server
 	bool isDirty = false;  //will be true if EEPROM needs to be written
 };
 
 CONTROLLER bootController;
+
+/*Modes;
+* C: connect via wifi to STA SSID and act as a client 
+* S: connect via wifi to STA SSID and act as a server
+* L: act as a standalone wifi AP and act as a server
+
+*/
+
 
 
 //++++++++++++ TCP IP ++++++++++++++++++++++++++++++++++++++++++++
@@ -168,11 +181,23 @@ static os_timer_t payloadTimer;
 #define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
 #define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
 
+
+enum DEVICE_TYPES : uint8_t{
+	DEVICE_SERVO,
+	DEVICE_ASPECT,
+	DEVICE_MAS,
+	DEVICE_SENSOR,
+	DEVICE_SENSOR_WPU
+	//DEVICE_SERVO_PCA
+};
+
+
+
 bool MAScommandSync;
 
 /*servo control.  VIRTUALSERVO is each virtualised device with its params.  Commanded over serial for testing
 or DCC in normal operation. VIRTUALSERVO objects support both mechanical servos and LED aspect signals */
-enum servoState {
+enum SERVOSTATE : uint8_t{
 	SERVO_NEUTRAL,
 	SERVO_TO_THROWN,
 	SERVO_THROWN,
@@ -181,10 +206,13 @@ enum servoState {
 	SERVO_BOOT,
 	ASPECT_THROWN,
 	ASPECT_CLOSED,
-	ASPECT_MULTIPLE
+	ASPECT_MULTIPLE,
+	SENSOR_HIGH,
+	SENSOR_LOW
 };
 
 struct VIRTUALSERVO {
+	uint8_t bank;
 	uint8_t pin;
 	uint16_t address;
 	uint8_t swing;
@@ -192,25 +220,22 @@ struct VIRTUALSERVO {
 	bool continuous;
 	bool power;
 	bool ignorePowerParameter;
-	bool isServo;  //servo or aspect
-	uint8_t state;
-	uint8_t position;
+	DEVICE_TYPES deviceType;
+	SERVOSTATE state;
+	uint8_t position;  //0-180 degrees
 	int8_t rate;  //+ve values speed up movement, -ve slow it down
 	int8_t timeDelay;  //working register, loaded negative and counts up to zero
 	uint8_t aspectParameters[ASPECT_PARAMETER_SIZE * 4];
-	//Servo* thisDriver;
 	uint8_t MASstate;  //Multiple Aspect Signal commanded state
 };
 
-//virtual servo objects
+//virtual servo objects, there are 9 in Bank 0 (the ESP12) and then 16 in each of Bank 1 and 2 which are PCA drivers
 VIRTUALSERVO virtualservoCollection[TOTAL_PINS];
 
-//servo drivers. This library creates a servo driver (pulse posn modulation) for each of the IO pins
-//Servo servoDriver[TOTAL_PINS];
 
 //function declaraions
 uint8_t parseBracketedParameters(char* token, uint8_t* result);
-bool isMASdevice(VIRTUALSERVO vs);
+//bool isMASdevice(VIRTUALSERVO vs);
 bool validatePin(int p);
 bool validateAddress(int address);
 uint8_t assertMASoutput(VIRTUALSERVO vs);
@@ -250,7 +275,7 @@ static void sendEnqueuedMessages();
 bool verbose;
 
 
-//5,4 are used for SCL,SDA on I2C
+
 
 //ESP-12 pinout
 //SCK 14 
@@ -281,6 +306,7 @@ bool nsESPaccessory::queueMessage(std::string s) {
 void nsESPaccessory::ESPaccessorySetup() {
 	Serial.begin(115200);
 	delay(200);
+	Serial.setTimeout(500);
 
 	verbose = false;
 	eeGetSettings();
@@ -290,7 +316,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 	verbose = true;
 
 
-	//pinMode(16, OUTPUT);  LED sits on D0
+	//pinMode(16, OUTPUT);  //LED sits on D0
 
 	deviceState = S_BOOT;
 	
@@ -340,7 +366,7 @@ void nsESPaccessory::ESPaccessoryLoop() {
 	case S_TCP_CONNECTED:
 		//flash led 0.2 sec on, 5 off
 		if (currentMillis - previousMillis >= interval) {
-	//		digitalWrite(16, ledState);  //led is active low, false=on    DEBUG disable
+			//digitalWrite(16, ledState);  //led is active low, false=on    DEBUG disable
 			interval = ledState ? 5000 : 200;
 			ledState = !ledState;
 			previousMillis = currentMillis;
@@ -371,55 +397,26 @@ void nsESPaccessory::ESPaccessoryLoop() {
 	}
 
 
-	/*
-		//Otherwise, get first message in queue and transmit
-		if (!messages.empty()) {
-			auto it = messages.begin();
-
-			if (clientX != nullptr) {
-				//have an active TCP link to send over.  Test if it is free to send
-				if (clientX->space() > 32 && clientX->canSend()) {
-					clientX->add((char*)it->msg, it->bytes);
-					clientX->send();
-					//flag the message as sent
-					it->sent = true;
-				}
-			}
-		}
-	*/
-
-
-	//serial, we need to define some commands, then read an entire input block then act on it
-	//note that modifying the Wifi AP SSID might not take effect until a reboot.
-
 	checkSerial();
 	sendEnqueuedMessages();
-
-	
-
-
-
-
-
-
-
-
 
 }// end main loop
 
 
 #pragma region "...SERIAL ROUTINES..."
 
-
-
-
 /// <summary>
 /// Read incoming serial commands and action
 /// </summary>
 void checkSerial(void) {
+	
 	if (!Serial.available()) return;
-	char SerialBuffer[32];
-	Serial.readString().toCharArray(SerialBuffer, 32);
+	char SerialBuffer[64];
+	Serial.readString().toCharArray(SerialBuffer, 64);
+
+	//Note: its a quirk of readString but ParseBracketedParameters won't work with the SerialBuffer reliably
+	//need to fix this in ParseBracketedParameters itself
+
 
 	//need a temporary virtualservo object
 	VIRTUALSERVO vsParse;
@@ -493,23 +490,6 @@ void checkSerial(void) {
 			Serial.printf("Network SSID %s\n", bootController.STA_SSID);
 			Serial.printf("Server IP %s\n", bootController.tcpIP);
 			Serial.printf("Server port %d\n\n", bootController.tcpPort);
-			
-			/*
-			if (bootController.relayMode[0] == 'K') {
-				Serial.println(F("KIOSK mode\n"));
-			}
-			else {
-				Serial.println(F("RELAY mode\n"));
-			}
-
-
-			if (bootController.relayMode[1] == '1') {
-				Serial.println(F("WATCHDOG ON\n\n"));
-			}
-			else {
-				Serial.println(F("WATCHDOG OFF\n\n"));
-			}
-			*/
 
 		}
 
@@ -551,8 +531,15 @@ void checkSerial(void) {
 			Serial.println(F("D=dump param buffer"));
 			Serial.println(F("R=reboot"));
 			Serial.println(F("M=mode"));
-			Serial.println(F("X=dump params\n"));
-			Serial.println(F("H=dump incoming\n"));
+			Serial.println(F("X=dump WIFI params\n\n"));
+			Serial.println(F("x=dump servo params"));
+			Serial.println(F("s=setup servo"));
+			Serial.println(F("a=setup aspect"));
+			Serial.println(F("A=setup MAS aspect"));
+			Serial.println(F("k=setup a sensor"));
+			Serial.println(F("p=command a pin"));
+			Serial.println(F("r=set servo rate"));
+			Serial.println(F("d or D=emulate DCC command"));
 		}
 
 		if (SerialBuffer[0] == 'R') {
@@ -561,33 +548,34 @@ void checkSerial(void) {
 		}
 
 		if (SerialBuffer[0] == 'M') {
-			//switch modes
-			if (SerialBuffer[1] == 'K') {
-				bootController.relayMode[0] = 'K';
-				Serial.println(F("KIOSK mode set\n"));
-			}
-			else {
-				bootController.relayMode[0] = 'R';
-				Serial.println(F("RELAY mode set\n"));
-			}
-
-			//optional 1 | 0 to enable | disable watchdog
-			switch (SerialBuffer[2]) {
-			case '1':
-				bootController.relayMode[1] = '1';
-				Serial.println(F("watchdog ON\n"));
-				break;
-			case '0':
-				bootController.relayMode[1] = '0';
-				Serial.println(F("watchdog OFF\n"));
-				break;
-			default:
-				Serial.println(F("watchdog no change\n"));
-			}
-
-			Serial.println(F("Now you must REBOOT\n\n"));
+			//switch modes MS ML MC or M? to query current mode
 			bootController.isDirty = true;
-			eePutSettings();
+
+			switch (SerialBuffer[1])
+			{
+			case 'S':
+				bootController.Mode[0] = 'S';
+				Serial.println(F("Server mode on home Wifi set\n"));
+				break;	
+			case 'L':
+				bootController.Mode[0] = 'L';
+				Serial.println(F("Stand alone Server set\n"));
+				break;
+			case 'C':
+				bootController.Mode[0] = 'C';
+				Serial.println(F("Client mode on home Wifi set\n"));
+				break;
+			case '?':
+			default:
+				Serial.printf("Current mode: %s\n", bootController.Mode[0]);
+				bootController.isDirty = false;
+				break;
+ 			}
+
+			if (bootController.isDirty) {
+				Serial.println(F("Now you must REBOOT\n\n"));
+				eePutSettings();
+			}
 		}
 
 
@@ -608,8 +596,6 @@ void checkSerial(void) {
 		//ASPECT set-up command. Usage: a pin,addr,invert,[ignorePower]
 		//ignorePower is default true and will ignore dcc power off commands
 		if (SerialBuffer[0] == 'a') {
-			vsParse.isServo = false;
-			vsParse.state = ASPECT_CLOSED;
 			bool resolved = true;
 
 			//detokenize
@@ -620,6 +606,7 @@ void checkSerial(void) {
 			while (pch != NULL) {
 				switch (i++) {
 				case 1:
+					vsParse.pin = strtol(pch, NULL, 10);
 					resolved = validatePin(vsParse.pin);
 					break;
 				case 2:
@@ -648,11 +635,15 @@ void checkSerial(void) {
 				for (auto& vs : virtualservoCollection) {
 					if (vs.pin == vsParse.pin) {
 						//clear vsParse.aspectParameters to MAS_EMPTY_VAL, as this array is only used by multi aspect signals
-						memset(vsParse.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-	//					vsParse.thisDriver = vs.thisDriver;
 						vs = vsParse;  //copy over from vsParse
-		//				if (vs.thisDriver->attached()) vs.thisDriver->detach();   
-												
+						memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+						vs.deviceType = DEVICE_ASPECT;
+						vs.state = ASPECT_CLOSED;
+						vs.ignorePowerParameter = true;
+						vs.continuous = false;  //default setting
+						vs.bank = 0;
+						vs.rate = 0;
+						ESPservoAttach(vs.pin, false);
 						//write to EEPROM
 						bootController.isDirty = true;
 						eePutSettings();
@@ -670,16 +661,21 @@ void checkSerial(void) {
 
 		//SERVO set-up command. Usage: s pin, addr, swing, invert, [continuous]
 		if (SerialBuffer[0] == 's') {
-			vsParse.isServo = true;
+			//default settings
+			vsParse.deviceType = DEVICE_SERVO;
 			vsParse.ignorePowerParameter = true;
-			vsParse.continuous = false;  //default setting
-			memset(vsParse.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+			vsParse.continuous = false; 
+			vsParse.bank = 0;
+			vsParse.position = 90;
+			vsParse.rate = 0;
+			vsParse.state = SERVO_TO_CLOSED;
 
 			//detokenize
 			bool resolved = true;
 			char* pch;
 			int i = 0;
 			pch = strtok(SerialBuffer, " ,");
+			
 			while (pch != NULL) {
 				switch (i++) {
 				case 1:
@@ -718,13 +714,10 @@ void checkSerial(void) {
 
 				for (auto& vs : virtualservoCollection) {
 					if (vs.pin != vsParse.pin) continue;
-					//first copy servo-driver pointer to servoParse
-				//	vsParse.thisDriver = vs.thisDriver;
-					//then copy servoParse to vs
+					//copy servoParse to vs
 					vs = vsParse;
-					vs.position = 90;
-					vs.isServo = true;
-					vs.state = SERVO_TO_CLOSED;
+					memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+
 					//write to EEPROM
 					bootController.isDirty = true;
 					eePutSettings();
@@ -764,8 +757,13 @@ void checkSerial(void) {
 						vsPointer = (VIRTUALSERVO*)&vs;
 
 						//2026-03-09 if this is a MAS signal, this command will not work
-						if (isMASdevice(vs)) {
+						if (vs.deviceType == DEVICE_MAS) {
 							Serial.println(F("Cannot use command on MAS aspect"));
+							resolved = false;
+						}
+
+						if (vs.deviceType == DEVICE_SENSOR) {
+							Serial.println(F("Cannot use command on a sensor"));
 							resolved = false;
 						}
 					}
@@ -774,7 +772,7 @@ void checkSerial(void) {
 				case 2:
 					if (vsPointer == nullptr) { resolved = false;break; }
 
-					if (vsPointer->isServo) {
+					if (vsPointer->deviceType==DEVICE_SERVO) {
 						switch (pch[0]) {
 						case 'c':
 							vsPointer->state = SERVO_TO_CLOSED;
@@ -789,7 +787,7 @@ void checkSerial(void) {
 							vsPointer->state = vsPointer->state == SERVO_CLOSED ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
 						}
 					}
-					else {
+					else if (vsPointer->deviceType == DEVICE_ASPECT) {
 						//signal aspect. Only supports thrown or closed states
 						switch (pch[0]) {
 						case 't':
@@ -845,26 +843,29 @@ void checkSerial(void) {
 
 				case 2:
 					//command.  Iterate all servos and execute on all matching addresses
+					//the command only operates on DEVICE_SERVO and DEVICE_ASPECT
 					for (auto& vs : virtualservoCollection) {
 						if (vs.address != address) continue;
+						if ((vs.deviceType != DEVICE_SERVO) && (vs.deviceType != DEVICE_ASPECT)) continue;
+
 
 						switch (pch[0]) {
 						case 't':
-							vs.state = vs.isServo ? SERVO_TO_THROWN : ASPECT_THROWN;
+							vs.state = vs.deviceType==DEVICE_SERVO ? SERVO_TO_THROWN : ASPECT_THROWN;
 							break;
 						case 'n':
-							vs.state = vs.isServo ? SERVO_NEUTRAL : ASPECT_CLOSED;
+							vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_NEUTRAL : ASPECT_CLOSED;
 							break;
 						case 'T':
-							if (vs.isServo) {
+							if (vs.deviceType == DEVICE_SERVO) {
 								vs.state = (vs.state == SERVO_CLOSED) ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
 							}
 							else {
 								vs.state = (vs.state == ASPECT_THROWN) ? ASPECT_CLOSED : ASPECT_THROWN;
 							}
 							break;
-						default:
-							vs.state = vs.isServo ? SERVO_TO_CLOSED : ASPECT_CLOSED;
+						default: //also covers closed
+							vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_TO_CLOSED : ASPECT_CLOSED;
 						}
 					}
 					break;
@@ -872,7 +873,8 @@ void checkSerial(void) {
 					//power.  Iterate all servos and execute on all matching addresses
 					for (auto& vs : virtualservoCollection) {
 						if (vs.address != address) continue;
-						if (!isMASdevice(vs)) continue;
+						//power is only applicable to servo and aspect
+						if ((vs.deviceType != DEVICE_SERVO) && (vs.deviceType != DEVICE_ASPECT)) continue;
 						vs.power = pch[0] == '1' ? true : false;
 					}
 					break;
@@ -913,7 +915,7 @@ void checkSerial(void) {
 
 					for (auto& vs : virtualservoCollection) {
 						if (vs.address != address) continue;
-						if (!isMASdevice(vs)) continue;
+						if (vs.deviceType != DEVICE_MAS) continue;
 						vs.MASstate = state;
 						MAScommandSync = false;
 						if (verbose) Serial.println(assertMASoutput(vs), DEC);
@@ -927,6 +929,73 @@ void checkSerial(void) {
 			if (resolved && (i >= 3)) Serial.println("OK");
 		}
 
+		//SENSOR command. sets up a sensor on a given pin, by default will be WPU a zero param is given
+		//some pins have pulldowns on the board and the WPU may not be enough to overcome these.
+		//usage k pin address [wpu]
+		if (SerialBuffer[0] == 'k') {
+			char* pch;
+			int i = 0;
+			pch = strtok(SerialBuffer, " ,");
+			int p = -1;
+			int address = -1;
+			bool resolved = true;
+			//default setting
+			vsParse.deviceType = DEVICE_SENSOR;
+			vsParse.ignorePowerParameter = true;
+			vsParse.continuous = false; 
+			vsParse.position =0;
+			vsParse.state = SERVO_BOOT;
+
+			while (pch != NULL) {
+				switch (i++) {
+				case 1:
+					p = strtol(pch, NULL, 10);
+					resolved = validatePin(p);
+					if (!resolved) break;
+					vsParse.pin = p;
+					break;
+
+				case 2:
+					//resolve address
+					address = strtol(pch, NULL, 10);
+					resolved = validateAddress(address);
+					vsParse.address = address;
+					break;
+
+				case 3:
+					//optional WPU
+					if (strtol(pch, NULL, 10) == 0) break;
+					vsParse.deviceType = DEVICE_SENSOR_WPU;
+					break;
+				}
+			
+				pch = strtok(NULL, " ,");
+				if (!resolved) break;
+			}
+
+			if (resolved && (i >= 2)) {
+				Serial.println("OK");
+				for (auto& vs : virtualservoCollection) {
+					if (vs.pin != vsParse.pin) continue;
+					//copy servoParse to vs
+					vs = vsParse;
+					memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+					ESPservoAttach(vs.pin, false);
+					//write to EEPROM
+					bootController.isDirty = true;
+					eePutSettings();
+					break;
+				}
+
+			}
+			else
+			{
+				Serial.println("bad command. usage k pin address [wpu]");
+			}
+
+		}
+
+		
 
 		//RATE command. sets a positive or negative rate on the servo swing.
 		//usage r pin rate, where rate is + or -ve integer, useful values are -10 to +10
@@ -975,7 +1044,6 @@ void checkSerial(void) {
 			else
 			{
 				Serial.println("bad command. usage r pin rate");
-				Serial.println(i, DEC);
 			}
 		}
 
@@ -983,8 +1051,106 @@ void checkSerial(void) {
 		if (SerialBuffer[0] == 'x') {
 
 			for (auto vs : virtualservoCollection) {
+				//rewrite as switch
+				switch (vs.deviceType) {
+				case DEVICE_SENSOR:
+				case DEVICE_SENSOR_WPU:
+					Serial.print("sensor  pin ");
+					Serial.print(vs.pin, DEC);
+					Serial.print("  address ");
+					Serial.print(vs.address, DEC);
+					break;
+
+				case DEVICE_SERVO:
+					Serial.print("servo  pin ");
+					Serial.print(vs.pin, DEC);
+					Serial.print("  address ");
+					Serial.print(vs.address, DEC);
+					Serial.print("  swing ");
+					Serial.print(vs.swing, DEC);
+					Serial.print("  invert ");
+					Serial.print(vs.invert, DEC);
+					Serial.print("  continuous ");
+					Serial.print(vs.continuous, DEC);
+					Serial.print("  rate ");
+					Serial.print(vs.rate, DEC);
+					break;
+
+				case DEVICE_ASPECT:
+					Serial.print(F("aspect pin "));
+					Serial.print(vs.pin, DEC);
+					Serial.print(F("  address "));
+					Serial.print(vs.address, DEC);
+					Serial.print(F("  invert "));
+					Serial.print(vs.invert, DEC);
+					Serial.print(F("  power "));
+					if (vs.ignorePowerParameter) { Serial.print("x"); }
+					else { Serial.print(vs.power, DEC); }
+					break;
+
+				case DEVICE_MAS:
+					Serial.print(F("MAS pin "));
+					Serial.print(vs.pin, DEC);
+					Serial.print(F("  address "));
+					Serial.print(vs.address, DEC);
+					Serial.print(F("  invert "));
+					Serial.print(vs.invert, DEC);
+
+					Serial.print(F("  output "));
+					switch (assertMASoutput(vs)) {
+					case 0:
+						Serial.print("0 ");
+						break;
+					case 1:
+						Serial.print("1 ");
+						break;
+
+					default:
+						Serial.print("tristate ");
+					}
+
+					//now the param arrays
+					bool noSpace = true;
+					for (uint8_t a = 0;a < 32;a++) {
+						if (a == 0) {
+							Serial.print(" hi[");
+							noSpace = true;
+						}
+						if (a == ASPECT_PARAMETER_SIZE - 1) {
+							Serial.print("] lo[");
+							noSpace = true;
+						}
+						if (a == (2 * ASPECT_PARAMETER_SIZE) - 1) {
+							Serial.print("] hi-flash[");
+							noSpace = true;
+						}
+						if (a == (3 * ASPECT_PARAMETER_SIZE) - 1) {
+							Serial.print("] lo-flash[");
+							noSpace = true;
+						}
+
+						if (vs.aspectParameters[a] == MAS_EMPTY_VAL) continue;
+						if (!noSpace) Serial.print(" ");
+						Serial.print(vs.aspectParameters[a], DEC);
+						noSpace = false;
+					}
+					Serial.print("]");
+					break;
+				
+				}//end switch
+
+
+				/*block disabled
+
 				//dump this pin
-				if (vs.isServo) {
+				if ((vs.deviceType==DEVICE_SENSOR)||(vs.deviceType == DEVICE_SENSOR_WPU)) {
+					Serial.print("sensor  pin ");
+					Serial.print(vs.pin, DEC);
+					Serial.print("  address ");
+
+
+				}
+				else if (vs.deviceType == DEVICE_SERVO) {
 					Serial.print("servo  pin ");
 					Serial.print(vs.pin, DEC);
 					Serial.print("  address ");
@@ -1065,19 +1231,21 @@ void checkSerial(void) {
 					}
 				}
 
-				//if (vs.thisDriver == nullptr) {
-					if (false){
-					Serial.print(" pointer bad");
-				}
-				else
-				{
+				*/
+
+				
 					//dump output state
 					switch (vs.state) {
+					case SENSOR_HIGH:
+						Serial.print(F(" hi" ));
+						break;
+					case SENSOR_LOW:
+						Serial.print(F(" lo "));
+						break;
 					case ASPECT_MULTIPLE:
 						Serial.print(F(" state "));
 						Serial.print(vs.MASstate, DEC);
 						break;
-
 					case ASPECT_THROWN:
 					case SERVO_THROWN:
 					case SERVO_TO_THROWN:
@@ -1087,8 +1255,13 @@ void checkSerial(void) {
 						Serial.print(F(" closed"));
 						break;
 					}
+				
+					//DEBUG state attach status
+					if (ESPservoIsAttached(vs.pin)) {
+						Serial.print(" AT ");
+					}else{ Serial.print(" U "); }
 
-				}
+
 				Serial.print("\n");
 			}
 		}
@@ -1104,6 +1277,14 @@ void checkSerial(void) {
 			pch = strtok(SerialBuffer, " ,");
 			bool resolved = true;
 			uint8_t bufOffset = 0;
+			//default is all output drivers are tri-state, await first dcc command
+			vsParse.deviceType = DEVICE_MAS;
+			vsParse.state = ASPECT_MULTIPLE;
+			vsParse.power = false;  
+			vsParse.ignorePowerParameter = true;
+			vsParse.invert=false;
+			vsParse.MASstate = 127; //default
+
 
 			while (pch != NULL) {
 				switch (i) {
@@ -1141,7 +1322,6 @@ void checkSerial(void) {
 					switch (parseBracketedParameters(pch, vsParse.aspectParameters + bufOffset))
 					{
 					case 2:
-
 						bufOffset += ASPECT_PARAMETER_SIZE;
 						i++;
 						break;
@@ -1176,16 +1356,10 @@ void checkSerial(void) {
 
 				for (auto& vs : virtualservoCollection) {
 					if (vs.pin != vsParse.pin) continue;
-
 					//copy received data to the item
-					vs.address = vsParse.address;
-					vs.isServo = false;
-					vs.power = false;  //default is all output drivers are tri-state, await first dcc command
-					vs.ignorePowerParameter = true;
-					vs.invert = vsParse.invert;
-
+					vs = vsParse;
 					memcpy(vs.aspectParameters, vsParse.aspectParameters, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-					vs.state = ASPECT_MULTIPLE;
+					ESPservoAttach(vs.pin, false);
 					break;
 				}
 				bootController.isDirty = true;
@@ -1196,14 +1370,10 @@ void checkSerial(void) {
 				Serial.println(F("Error parsing command. Usage A pin addr invert [hi] [lo] [hi-flash] [low-flash]"));
 			}
 
-
 		}
 
 
 
-
-
-	
 
 
 }  //end checkSerial()
@@ -1223,7 +1393,7 @@ void checkSerial(void) {
 	/// <returns>true if valid</returns>
 bool validatePin(int p) {
 	if ((p < BASE_PIN) || (p >= BASE_PIN + TOTAL_PINS)) {
-		Serial.println("bad pin");
+		Serial.printf("bad pin %d\n",p);
 		return false;
 	}
 	return true;
@@ -1244,6 +1414,7 @@ bool validateAddress(int address) {
 }
 
 
+/*
 /// <summary>
 /// test if the vs object is a Multiple Aspect Signal device
 /// </summary>
@@ -1257,7 +1428,7 @@ bool isMASdevice(VIRTUALSERVO vs) {
 	}
 	return false;
 }
-
+*/
 
 
 /// <summary>
@@ -1271,6 +1442,14 @@ bool isMASdevice(VIRTUALSERVO vs) {
 uint8_t parseBracketedParameters(char* token, uint8_t* result) {
 	//known bug: you can pass in params values >254 or negative and they will be stored/truncated into the parameter arrays with
 	//unpredictable outcomes.  They are not validated here.
+
+	//bug fix, run through token and replace any cr/lf null.  Serial.readString will capture a cr or lf as its last character
+	//and this causes the parser to fail on an otherwise valid string.
+	for (int j = strlen(token) - 1;j > 0;j--) {
+		if (token[j] == '\n') token[j] = '\0';
+		if (token[j] == '\r') token[j] = '\0';
+	}
+
 	static int8_t arr[ASPECT_PARAMETER_SIZE];
 	static uint8_t c = 0;
 	static uint8_t parserState = 0;
@@ -1368,8 +1547,8 @@ uint8_t parseBracketedParameters(char* token, uint8_t* result) {
 			result[a] = arr[a];
 		}
 	}
-	return parserState;
 
+	return parserState;
 };
 
 
@@ -1512,7 +1691,7 @@ void eeGetSettings(void) {
 			vs.state = SERVO_BOOT;
 			vs.power = false;
 			vs.ignorePowerParameter = true;
-			vs.isServo = true;
+			vs.deviceType = DEVICE_SERVO;
 			vs.rate = 0;
 			memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
 			++p;
@@ -1538,7 +1717,7 @@ void eeGetSettings(void) {
 			vs.pin = p;
 			vs.state = SERVO_BOOT;
 			vs.MASstate = 127;
-			//s.position = 90;  //neutral
+			//vs.position = 90;  //neutral
 			/*minimum useful swing is 5 degrees*/
 			if ((vs.swing < 5) || (vs.swing > 90)) vs.swing = 5;
 
@@ -1555,12 +1734,7 @@ void eeGetSettings(void) {
 			//2026-02-13 for some reason, address data is corrupt when reading back pin 3 parameters.
 			//try masking out irrelevant bits.  FFF allows 2048d, whereas 7FF allows upto 2047d
 			vs.address &= 0xFFF;
-
-
-			//Servo.h for the ESP12 needs to be fed the GPIO reference, all we are doing here is associating 
-			//each servoDriver with its virtualServo parent
-			//servoDriver[i].detach();
-			//vs.thisDriver = &servoDriver[i];
+					
 			++p;
 			++i;
 		}
@@ -1691,6 +1865,11 @@ void sendEnqueuedMessages() {
 		jumboMessage.append(m);
 	}
 
+	//2026-04-22 bug fix, if you queue messages but there's no client, the block below will cause a crash
+	if (!clientX) {
+		messages.clear();
+		return;
+	}
 
 	if (jumboMessage.size() > 0) {
 		char* data = new char[jumboMessage.size() + 1];
@@ -1743,6 +1922,7 @@ bool nsESPaccessory::getVerbose(void) {
 
 
 //PROCESS SERVO POSITIONS AND SIGNAL ASPECTS
+//processServo() is called at 15ms intervals from a timer
 
 void processServo(void) {
 	static VIRTUALSERVO* vsBoot = nullptr;
@@ -1758,6 +1938,8 @@ void processServo(void) {
 	//for signal aspects, we move from ASPECT_CLOSED or ASPECT_THROWN straight to the antiphase, and we heed the .power parameter
 
 	for (auto& vs : virtualservoCollection) {
+		if (vs.pin > 8) continue;  //invalid pin
+
 		uint8_t maxPosition = vs.swing + 90;
 		uint8_t minPosition = 90 - vs.swing;
 		uint8_t gpioPin = NodeMCUmap[vs.pin];
@@ -1771,7 +1953,7 @@ void processServo(void) {
 		switch (vs.state) {
 		case SERVO_NEUTRAL:
 			vs.position = 90;
-		//	if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+			ESPservoAttach(vs.pin,true);
 			break;
 
 		case SERVO_TO_CLOSED:
@@ -1791,7 +1973,7 @@ void processServo(void) {
 				vs.state = SERVO_CLOSED;
 			}
 
-		//	if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+			ESPservoAttach(vs.pin, true);
 			break;
 
 		case SERVO_TO_THROWN:
@@ -1811,20 +1993,17 @@ void processServo(void) {
 				vs.state = SERVO_THROWN;
 			}
 
-			//if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
+			ESPservoAttach(vs.pin, true);
 			break;
 
 		case SERVO_THROWN:
 			vs.position = vs.invert ? minPosition : maxPosition;
-		//	if ((vs.thisDriver->attached()) && (!vs.continuous)) {
-			//	vs.thisDriver->detach();
-			//}
+			if (!vs.continuous) ESPservoAttach(vs.pin, false);
 			break;
+
 		case SERVO_CLOSED:
 			vs.position = vs.invert ? maxPosition : minPosition;
-		//	if ((vs.thisDriver->attached()) && (!vs.continuous)) {
-				//vs.thisDriver->detach();
-		//	}
+			if (!vs.continuous) ESPservoAttach(vs.pin, false);
 			break;
 
 		case ASPECT_CLOSED:
@@ -1858,29 +2037,75 @@ void processServo(void) {
 			if (MAScommandSync) assertMASoutput(vs);
 			break;
 
+
+		case SENSOR_HIGH:
+		case SENSOR_LOW:
+			//for sensors we repurpose the position parameter to record the input state every 15ms
+			//and this in turn is used to debounce the input 8 zeros or 1s must be seen
+			if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) break;
+			vs.position = vs.position << 1;
+			vs.position += digitalRead(gpioPin);  
+			
+
+			//2026-04-21 found the sensor bug.  If you queue a TCP message before you are connected then this caused a crash
+			//this is now fixed in sendEnqueueMessages().  No need to suspend &servoTimer
+
+			if ((vs.state == SENSOR_HIGH) && (vs.position == 0)) {
+					//declare low
+					//os_timer_disarm(&servoTimer);
+					nsLOCONETaccessoryProcessor::sensorEvent(vs.address,false);
+					vs.state = SENSOR_LOW;
+					//os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
+			}
+
+			if ((vs.state == SENSOR_LOW) && (vs.position == 0xFF)){
+					//os_timer_disarm(&servoTimer);
+					nsLOCONETaccessoryProcessor::sensorEvent(vs.address, true);
+					vs.state = SENSOR_HIGH;
+					//os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
+			}
+			break;
+
 		case SERVO_BOOT:
 			if (vsBoot == nullptr) {
 				//handle next-up servo to boot. servos are booted in the CLOSED position
 				//and aspects are booted with POWER=off
 				vsBoot = (VIRTUALSERVO*)&vs;
 				bootTimer = 34;
-				if (vs.isServo) {
-					vs.position = vs.invert ? maxPosition : minPosition;
-					//if (!vs.thisDriver->attached()) vs.thisDriver->attach(gpioPin);
-					//vs.thisDriver->write(vs.position);
-				}
-				else {
-					//aspect. Immediately go to closed state with power off
-					vs.power = false;
-					vs.state = isMASdevice(vs) ? ASPECT_MULTIPLE : ASPECT_CLOSED;
+	
+				//refactor as switch.  vs and vsBoot are the same item
+				switch (vs.deviceType) {
+				case DEVICE_SENSOR:
+				case DEVICE_SENSOR_WPU:
+					ESPservoAttach(vs.pin, false);
+					pinMode(gpioPin, INPUT);
+					vs.position = 0xFF;  //spoof a high input state
+					vs.state = SENSOR_HIGH;
 					vsBoot = nullptr;
 					bootTimer = 0;
-					//vs.thisDriver->detach();
+					break;
+
+				case DEVICE_SERVO:
+					vs.position = vs.invert ? maxPosition : minPosition;
+					ESPservoAttach(vs.pin, true);
+					ESPservoWrite(vs.pin, vs.position);
+					break;
+
+				case DEVICE_MAS:
+					vs.MASstate = 127;
+				case DEVICE_ASPECT:
+					vs.power = false;
+					vs.state = vs.deviceType==DEVICE_MAS ? ASPECT_MULTIPLE : ASPECT_CLOSED;
+					vsBoot = nullptr;
+					bootTimer = 0;
+					ESPservoAttach(vs.pin, false);
+					break;
 				}
+
 
 			}
 			else if (vsBoot == (VIRTUALSERVO*)&vs) {
-				//if this is the current boot-servo, then decrement bootTimer
+				//This is the current boot-servo. Decrement bootTimer
 				bootTimer -= bootTimer > 0 ? 1 : 0;
 
 				//timed out?
@@ -1895,16 +2120,13 @@ void processServo(void) {
 			break;
 		}
 
-		//update the servo position every 15mS
-		//if (vs.thisDriver) vs.thisDriver->write(vs.position);    ///BUG writing this causes a WDT soft reset.  I think it is likely interfering with the WiFi
+		//update servo positions every 15ms
+		if (vs.deviceType==DEVICE_SERVO) ESPservoWrite(vs.pin, vs.position);
+
 	}
 
-	//NOW we have a wdt reset; we generate PWM and connect to wifi but after pin booted0 appears, the unit locks up and hits a wdt reset and does not respond to 
-	// serial either.
-	
-
-
 }
+
 
 
 //2026-04-14 give up on servo support.   The nodeMCU has 3v3 outputs, and so the breakoutboard servo pin connectors are all 3v3

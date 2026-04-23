@@ -269,3 +269,35 @@ this <B1> opcode encodes current OUTPUT levels
 
 }
 
+/// <summary>
+/// declare a sensor event
+/// </summary>
+/// <param name="event">false </param>
+void nsLOCONETaccessoryProcessor::sensorEvent(uint16_t address,bool event) {
+/* <0xB2>,<SN1>,<SN2>,<CHK> SENSOR state REPORT  NO feedback
+<SN1> =<0,A6,A5,A4- A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
+<SN2> =<0,1,I,L- A10,A9,A8,A7> Report/status bits and 4 MS adr bits.
+ this <B1> opcode encodes input levels for turnout feedback
+"I" =0 for "aux" inputs (normally not feedback), 1 for "switch" input used for turnout
+feedback for DS54 ouput/turnout # encoded by A0-A10
+"L" = 0 for this input 0V (LO), 1= this input > +6V (HI)
+alternately;
+<SN2> =<0,0,C,T- A10,A9,A8,A7>
+Report/status bits and 4 MS adr bits.
+this <B1> opcode encodes current OUTPUT levels
+"C"= 0 if "Closed" ouput line is OFF, 1="closed" output line is ON (sink current)
+"T"=0 if "Thrown" output line is OFF, 1="thrown" output line is ON (sink I)
+*/
+	uint8_t payload[4];
+	payload[0] = 0xB2;
+	payload[1] = address & 0x7F;
+	payload[2] = address >> 8;
+	payload[2] += event ? 0b01010000 : 0b01000000;
+	payload[3] = 0xFF ^ payload[2] ^ payload[1] ^ payload[0];
+	
+	char buf[25];
+	snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+	nsESPaccessory::queueMessage(buf);
+
+}
+

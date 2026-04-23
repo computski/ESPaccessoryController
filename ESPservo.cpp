@@ -8,14 +8,22 @@
 #include <eagle_soc.h>
 #include <ets_sys.h>
 //now adding gpio.h for function GPIO_PIN_ADDR
-#include <gpio.h>
+//#include <gpio.h>
+
+extern "C" {
+#include <osapi.h>
+#include <os_type.h>
+}
+
+
 
 #ifndef SDK_PWM_PERIOD_COMPAT_MODE
 #define SDK_PWM_PERIOD_COMPAT_MODE 0
 #endif
 #define PWM_USE_NMI 0
 
-
+const uint8_t NodeMCUmap[] = { 16,5,4,0,2,14,12,13,15 };
+volatile static SERVO servoPool[9];  //9 pins
 
 
 //timer div16 gives 200nS ticks, and div256 gives 3.2uS ticks
@@ -56,38 +64,55 @@ struct timer_regs {
 static struct timer_regs* timer = (struct timer_regs*)(0x60000600);
 
 
+#define RANGE90
+#ifdef RANGE90
+const int MIN_PULSE = 312;  //1ms
+const int MAX_PULSE = 625;  //2ms
+const int PAD_PULSE = 6250;  //20ms notional, but must be > 9 x MAX
+const int NEUTRAL_PULSE = 428;
+
+#else
+const int MIN_PULSE = 156;  //0.5ms
+const int MAX_PULSE = 780;  //2.5ms
+const int PAD_PULSE = 7030;
+const int NEUTRAL_PULSE = 428;
+#endif // RANGE90
 
 
 
 
 
-//rotate through each servo and assert each servo pulse in turn, with all of them repeating on a 20mS (6250 ticks) cycle
-//
-
-
+//cascade through each servo and assert each servo pulse in turn, with all of them repeating on a 20mS (6250 ticks) cycle
 static void IRAM_ATTR servo_handler(void) {
 	static uint8_t servoIndex = 0;
-	static uint16_t periodPadding = 6250;
+	static uint16_t periodPadding = PAD_PULSE;
 	static uint32_t servoGPIOmask = 0;
 
 	gpio->out_w1tc = servoGPIOmask;  //clear down the last servo hi period
 
 	if (servoIndex < 9) {
 		//0-8 we load up the servo specific pulse period
-		servoGPIOmask = 1 << servoPool[servoIndex].gpioPin;
-		WRITE_PERI_REG(&timer->frc1_load, servoPool[servoIndex].hiPulseLen);  //1.5mS test
+		//if a servo is not attached, then we clear servoGPIOmask and we still need to load the pulse period
+		//to ensure we have another int and advance through all pins
+				
+		if (servoPool[servoIndex].isAttached) {
+			servoGPIOmask = 1 << servoPool[servoIndex].gpioPin;
+			gpio->out_w1ts = servoGPIOmask;
+		}
+		else {
+			//do not actively drive the pin hi or lo
+			servoGPIOmask = 0;
+		}
+
+		WRITE_PERI_REG(&timer->frc1_load, servoPool[servoIndex].hiPulseLen);
 		periodPadding -= servoPool[servoIndex].hiPulseLen;
-		gpio->out_w1ts = servoGPIOmask;
-
-		//if detached then i think we hold the pin low, but maybe we release it entirely to float as an input
-		//basically we don't want to put it in the mask nor deduct it from Padding
-
-
+			
 	}
-	else if (servoIndex >= 9) {
+	else {
 	//9, we stay low for the remainder of periodPadding and reset index and padding
 		WRITE_PERI_REG(&timer->frc1_load, periodPadding);
-		periodPadding = 6250;
+		periodPadding = PAD_PULSE;
+		servoGPIOmask = 0;
 		servoIndex = 0;
 	}
 
@@ -101,16 +126,12 @@ static void IRAM_ATTR servo_handler(void) {
 
 void ESPservoInit() {
 	//populate GPIO pins
-	uint8_t NodeMCUmap[] = { 16,5,4,0,2,14,12,13,15 };
-	uint8_t* gp = NodeMCUmap;
-
+	uint8_t i;
 
 	for (auto& s : servoPool) {
-		s.hiPulseLen = 468;  //neutral
+		s.hiPulseLen = NEUTRAL_PULSE;
+		s.gpioPin = NodeMCUmap[i++];
 		s.isAttached = false;
-		s.position = 0;
-		s.gpioPin = *gp;
-		gp++;
 	}
 
 
@@ -120,7 +141,107 @@ void ESPservoInit() {
 	TIMER_REG_WRITE(FRC1_LOAD_ADDRESS, 0);  //This starts timer.  +++++++++ RTC_REG_WRITE is deprecated ++++++
 	timer->frc1_ctrl = TIMER1_DIVIDE_BY_256 | TIMER1_ENABLE_TIMER;
 
-	pinMode(5, OUTPUT);
-	pinMode(4, OUTPUT);
+}
 
+
+void ESPservoDebug() {
+	
+	uint8_t i;
+
+	for (auto& s : servoPool) {
+		s.hiPulseLen = NEUTRAL_PULSE;
+		s.gpioPin = NodeMCUmap[i++];
+		s.isAttached = true;
+		pinMode(s.gpioPin, OUTPUT);
+	}
+
+	ETS_FRC_TIMER1_INTR_ATTACH(servo_handler, NULL);
+	TM1_EDGE_INT_ENABLE();
+	ETS_FRC1_INTR_ENABLE();
+	TIMER_REG_WRITE(FRC1_LOAD_ADDRESS, 0);  //This starts timer.  +++++++++ RTC_REG_WRITE is deprecated ++++++
+	timer->frc1_ctrl = TIMER1_DIVIDE_BY_256 | TIMER1_ENABLE_TIMER;
+	
+
+}
+
+
+
+
+
+
+
+
+
+
+/// <summary>
+/// Command a servo to a position
+/// </summary>
+/// <param name="pin">Pin 0-8</param>
+/// <param name="position">0-180 degrees</param>
+void ESPservoWrite(uint8_t pin, uint8_t position) {
+	//find which index we are dealing with
+	if (pin > 8) return;
+	for (auto &s : servoPool) {
+		if (s.gpioPin == NodeMCUmap[pin]) {
+			/*
+			//calculate new delay from position. 1mS = 312, 2mS = 625
+			float d = position/180.0;
+			d *= 313;  //1mS range is 313 ticks
+			d += 313;  //add 1mS offset as min period
+			s.hiPulseLen = (uint16_t) d;
+			if (s.hiPulseLen > 625) s.hiPulseLen = 625;
+			*/
+
+			//calculate new delay from position. 0.5ms = 156, 2.5mS = 781
+			float d = position / 180.0;
+			d *= (MAX_PULSE-MIN_PULSE);  //full range
+			d += MIN_PULSE;  //add min pulse offset
+			s.hiPulseLen = (uint16_t)d;
+			if (s.hiPulseLen > MAX_PULSE) s.hiPulseLen = MAX_PULSE;
+
+			return;
+		}
+	}
+}
+
+/// <summary>
+/// If not already attached, set the pin as an output and drive with pwm.
+/// Detach does not change the pinMode
+/// </summary>
+/// <param name="pin">Pin 0-8</param>
+/// <param name="attach">desired attach state</param>
+void ESPservoAttach(uint8_t pin, bool attach) {
+	if (pin > 8) return;
+	for (auto& s : servoPool) {
+		if (s.gpioPin == NodeMCUmap[pin]) {
+						
+			//if commanding attach, then assert an output if current state is detach
+			if (attach) { 
+				if (!s.isAttached) pinMode(NodeMCUmap[pin], OUTPUT);
+			}
+			else { //if commanding detach then clear pin down if current state is attach
+				if (s.isAttached) gpio->out_w1tc = 1 << NodeMCUmap[pin];
+			}
+
+			//capture newly commanded state
+			s.isAttached = attach;
+			//for detach, we leave pin as an output driving low.  Main program can take over the 
+			//assignment of that pin
+		}
+	}
+}
+
+/// <summary>
+/// returns current servo pin attachment state
+/// </summary>
+/// <param name="pin">pin 0-8</param>
+/// <returns>true if driving the servo</returns>
+bool ESPservoIsAttached(uint8_t pin) {
+	if (pin > 8) return false;
+	for (const auto &s : servoPool) {
+		if (s.gpioPin == NodeMCUmap[pin]) {
+			return s.isAttached;
+		}
+	}
+	return false;
 }

@@ -51,7 +51,7 @@ namespace nsLOCONETaccessoryProcessor {
 	void handleLocoNet(void* arg, AsyncClient* client, void* data, size_t len);
 	void tokenProcessor(char* msg, AsyncClient* client);
 	void cleanExit(void);
-
+	void sensorEvent(uint16_t address, bool event);
 
 }
 
