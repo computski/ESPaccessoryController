@@ -1,14 +1,13 @@
-// 
+// IMPORTANT: GPIO16 is part of the RTC module, and cannot be controlled via out_w1ts/out_w1tc
 // 
 // 
 
+
+
 #include "ESPservo.h"
 #include <c_types.h>
-#include <pwm.h>
 #include <eagle_soc.h>
 #include <ets_sys.h>
-//now adding gpio.h for function GPIO_PIN_ADDR
-//#include <gpio.h>
 
 extern "C" {
 #include <osapi.h>
@@ -22,7 +21,7 @@ extern "C" {
 #endif
 #define PWM_USE_NMI 0
 
-const uint8_t NodeMCUmap[] = { 16,5,4,0,2,14,12,13,15 };
+const uint8_t NodeMCUmap[] = { 16,5,4,0,2,14,12,13,15 };  
 volatile static SERVO servoPool[9];  //9 pins
 
 
@@ -83,45 +82,38 @@ const int NEUTRAL_PULSE = 428;
 
 
 //cascade through each servo and assert each servo pulse in turn, with all of them repeating on a 20mS (6250 ticks) cycle
+//index 0 is not used as GPIO16 cannot be driven with out_w1ts/c
 static void IRAM_ATTR servo_handler(void) {
-	static uint8_t servoIndex = 0;
+	static uint8_t servoIndex = 1;
 	static uint16_t periodPadding = PAD_PULSE;
 	static uint32_t servoGPIOmask = 0;
 
 	gpio->out_w1tc = servoGPIOmask;  //clear down the last servo hi period
+	servoGPIOmask = 0;
+
+	//1-8 we load up the servo specific pulse period
+	//if a servo is not attached, then we clear servoGPIOmask and we still need to load the pulse period
+	//to ensure we have another int and advance through all pins
 
 	if (servoIndex < 9) {
-		//0-8 we load up the servo specific pulse period
-		//if a servo is not attached, then we clear servoGPIOmask and we still need to load the pulse period
-		//to ensure we have another int and advance through all pins
-				
 		if (servoPool[servoIndex].isAttached) {
 			servoGPIOmask = 1 << servoPool[servoIndex].gpioPin;
 			gpio->out_w1ts = servoGPIOmask;
 		}
-		else {
-			//do not actively drive the pin hi or lo
-			servoGPIOmask = 0;
-		}
 
 		WRITE_PERI_REG(&timer->frc1_load, servoPool[servoIndex].hiPulseLen);
-		periodPadding -= servoPool[servoIndex].hiPulseLen;
-			
-	}
-	else {
-	//9, we stay low for the remainder of periodPadding and reset index and padding
+		periodPadding -= servoPool[servoIndex++].hiPulseLen;
+	}else {
+		//9, we stay low for the remainder of periodPadding and reset index and padding
 		WRITE_PERI_REG(&timer->frc1_load, periodPadding);
 		periodPadding = PAD_PULSE;
-		servoGPIOmask = 0;
-		servoIndex = 0;
+		servoIndex = 1;
 	}
-
-	servoIndex++;
 
 	//reset the timer with the load value recently given to it
 	asm volatile ("" : : : "memory");//memory barrier compiler instruction
 	timer->frc1_int &= ~FRC1_INT_CLR_MASK;
-	
+
 }
 
 void ESPservoInit() {
@@ -134,7 +126,6 @@ void ESPservoInit() {
 		s.isAttached = false;
 	}
 
-
 	ETS_FRC_TIMER1_INTR_ATTACH(servo_handler, NULL);
 	TM1_EDGE_INT_ENABLE();
 	ETS_FRC1_INTR_ENABLE();
@@ -142,33 +133,6 @@ void ESPservoInit() {
 	timer->frc1_ctrl = TIMER1_DIVIDE_BY_256 | TIMER1_ENABLE_TIMER;
 
 }
-
-
-void ESPservoDebug() {
-	
-	uint8_t i;
-
-	for (auto& s : servoPool) {
-		s.hiPulseLen = NEUTRAL_PULSE;
-		s.gpioPin = NodeMCUmap[i++];
-		s.isAttached = true;
-		pinMode(s.gpioPin, OUTPUT);
-	}
-
-	ETS_FRC_TIMER1_INTR_ATTACH(servo_handler, NULL);
-	TM1_EDGE_INT_ENABLE();
-	ETS_FRC1_INTR_ENABLE();
-	TIMER_REG_WRITE(FRC1_LOAD_ADDRESS, 0);  //This starts timer.  +++++++++ RTC_REG_WRITE is deprecated ++++++
-	timer->frc1_ctrl = TIMER1_DIVIDE_BY_256 | TIMER1_ENABLE_TIMER;
-	
-
-}
-
-
-
-
-
-
 
 
 
@@ -176,29 +140,19 @@ void ESPservoDebug() {
 /// <summary>
 /// Command a servo to a position
 /// </summary>
-/// <param name="pin">Pin 0-8</param>
+/// <param name="pin">Pin 1-8</param>
 /// <param name="position">0-180 degrees</param>
 void ESPservoWrite(uint8_t pin, uint8_t position) {
 	//find which index we are dealing with
-	if (pin > 8) return;
+	if ((pin==0) ||(pin > 8)) return;
 	for (auto &s : servoPool) {
 		if (s.gpioPin == NodeMCUmap[pin]) {
-			/*
-			//calculate new delay from position. 1mS = 312, 2mS = 625
-			float d = position/180.0;
-			d *= 313;  //1mS range is 313 ticks
-			d += 313;  //add 1mS offset as min period
-			s.hiPulseLen = (uint16_t) d;
-			if (s.hiPulseLen > 625) s.hiPulseLen = 625;
-			*/
-
 			//calculate new delay from position. 0.5ms = 156, 2.5mS = 781
 			float d = position / 180.0;
 			d *= (MAX_PULSE-MIN_PULSE);  //full range
 			d += MIN_PULSE;  //add min pulse offset
 			s.hiPulseLen = (uint16_t)d;
 			if (s.hiPulseLen > MAX_PULSE) s.hiPulseLen = MAX_PULSE;
-
 			return;
 		}
 	}
@@ -208,10 +162,10 @@ void ESPservoWrite(uint8_t pin, uint8_t position) {
 /// If not already attached, set the pin as an output and drive with pwm.
 /// Detach does not change the pinMode
 /// </summary>
-/// <param name="pin">Pin 0-8</param>
+/// <param name="pin">Pin 1-8</param>
 /// <param name="attach">desired attach state</param>
 void ESPservoAttach(uint8_t pin, bool attach) {
-	if (pin > 8) return;
+	if ((pin==0)||(pin > 8)) return;
 	for (auto& s : servoPool) {
 		if (s.gpioPin == NodeMCUmap[pin]) {
 						
@@ -234,7 +188,7 @@ void ESPservoAttach(uint8_t pin, bool attach) {
 /// <summary>
 /// returns current servo pin attachment state
 /// </summary>
-/// <param name="pin">pin 0-8</param>
+/// <param name="pin">pin 1-8</param>
 /// <returns>true if driving the servo</returns>
 bool ESPservoIsAttached(uint8_t pin) {
 	if (pin > 8) return false;

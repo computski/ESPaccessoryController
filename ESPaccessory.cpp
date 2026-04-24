@@ -1614,22 +1614,24 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 
 	}
 
+	uint8_t gpioPin = NodeMCUmap[vs.pin];
+	
 	//assert the output pin, also process invert
 	switch (outputState) {
 	case TRISTATE:
-		pinMode(vs.pin, INPUT);
+		pinMode(gpioPin, INPUT);
 		break;
 
 	case LO:
 		outputState = vs.invert ? HI : LO;
-		pinMode(vs.pin, OUTPUT);
-		digitalWrite(vs.pin, outputState == LO ? LOW : HIGH);
+		pinMode(gpioPin, OUTPUT);
+		digitalWrite(gpioPin, outputState == LO ? LOW : HIGH);
 		break;
 
 	case HI:
 		outputState = vs.invert ? LO : HI;
-		pinMode(vs.pin, OUTPUT);
-		digitalWrite(vs.pin, outputState == LO ? LOW : HIGH);
+		pinMode(gpioPin, OUTPUT);
+		digitalWrite(gpioPin, outputState == LO ? LOW : HIGH);
 		break;
 
 	}

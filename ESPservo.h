@@ -18,7 +18,6 @@ struct SERVO {
 
 
 void ESPservoInit();
-void ESPservoDebug();
 void ESPservoWrite(uint8_t pin, uint8_t position);
 void ESPservoAttach(uint8_t pin, bool isAttached);
 bool ESPservoIsAttached(uint8_t pin);
