@@ -43,20 +43,8 @@ VERBOSE command is: v, this will dump loconet messages to serial. reverts to ver
 
 
 /*
-BUGS
-2026-04-19 set pin 1 as sensor but it seems to be driving a low as an output
-maybe the int routine?
-maybe its the write position routine?
-
-2026-04-21 i also still have the problem that pin 0 (GPIO 16) is stuck low.  why? [it boots hi]
-
-2026-04-22 more weird bugs.  D0 won't show any pwm, and D4 is high but when triggered it shows negative blips but not proper pwm
-there are possibly some hw limitations, but surely pins like D4 can be driven low?
-D4 is connected to the on-module LED.  (D0 is connected to the motherboard LED)
-
-D0 has a pullup via LED. D3 and D4 have 12k pullups.  D8 has a 12k pulldown
-but D3 works just fine and is idle low... but D4 stays high and if you keep the driver attached you see no pwm (or the pulse time is too long)
-very odd.
+2026-04-28 to do... create a 2Hz timer for MAS state and sort out MAScommandSync.  does not make sense to dedicate a timer to it
+when we can derive it off a 15mS interval count for processServo()
 
 
 
@@ -91,9 +79,7 @@ on the PCA9685 device it will be pins 0-15
 #include "ESPaccessory.h"
 #include "ESPservo.h"
 #include <stdint.h>
-
-
-
+#include <Wire.h>
 
 const uint8_t NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
 //5,4 are commonly used for SCL,SDA on I2C
@@ -120,7 +106,7 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260409;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260410;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.1\0";   //note the actual setting requires comma separators
@@ -129,10 +115,12 @@ struct CONTROLLER
 	char tcpIP[17] = "192.168.1.118\0";   //target IP of CONTROLLER to connect to
 	uint16_t tcpPort = 1234;       //tcp port
 	char Mode[2] = "C";  //C denotes client, S server and L as standalone wifi server
+	bool hasPCA9685modules = false; //denotes PCA modules are present
 	bool isDirty = false;  //will be true if EEPROM needs to be written
 };
 
 CONTROLLER bootController;
+uint8_t bankSelect = 0;
 
 /*Modes;
 * C: connect via wifi to STA SSID and act as a client 
@@ -158,7 +146,7 @@ enum RELAY {
 
 unsigned long previousMillis;
 unsigned long interval;
-bool ledState = true;
+bool heartbeatLEDstate = true;
 
 static os_timer_t hearbeatTimer;
 
@@ -208,7 +196,9 @@ enum SERVOSTATE : uint8_t{
 	ASPECT_CLOSED,
 	ASPECT_MULTIPLE,
 	SENSOR_HIGH,
-	SENSOR_LOW
+	SENSOR_LOW,
+	HEARTBEAT_LOW,
+	HEARTBEAT_HIGH
 };
 
 struct VIRTUALSERVO {
@@ -235,7 +225,6 @@ VIRTUALSERVO virtualservoCollection[TOTAL_PINS];
 
 //function declaraions
 uint8_t parseBracketedParameters(char* token, uint8_t* result);
-//bool isMASdevice(VIRTUALSERVO vs);
 bool validatePin(int p);
 bool validateAddress(int address);
 uint8_t assertMASoutput(VIRTUALSERVO vs);
@@ -367,8 +356,8 @@ void nsESPaccessory::ESPaccessoryLoop() {
 		//flash led 0.2 sec on, 5 off
 		if (currentMillis - previousMillis >= interval) {
 			//digitalWrite(16, ledState);  //led is active low, false=on    DEBUG disable
-			interval = ledState ? 5000 : 200;
-			ledState = !ledState;
+			interval = heartbeatLEDstate ? 5000 : 200;
+			heartbeatLEDstate = !heartbeatLEDstate;
 			previousMillis = currentMillis;
 		}
 		break;
@@ -383,7 +372,7 @@ void nsESPaccessory::ESPaccessoryLoop() {
 		//flash led 1 sec on/off
 		if (currentMillis - previousMillis >= 1000) {
 			//digitalWrite(16, ledState);
-			ledState = !ledState;
+			heartbeatLEDstate = !heartbeatLEDstate;
 			previousMillis = currentMillis;
 
 			//NOTE: this technique of only allowing one pending connect at a time seems to work.  The asyncTCP object does have a timeout on it, and will call disconnect
@@ -467,7 +456,49 @@ void checkSerial(void) {
 				bootController.isDirty = true;
 				eePutSettings();
 			}
+	}
+
+	if (SerialBuffer[0] == 'B') {
+		//BE or BX enables/disables I2C communication to PCA modules
+		//B0 B1 B2 selects servo banks, with B1+ as PCA
+		//B? gives current bank.
+
+		switch (SerialBuffer[1]){
+		
+		case '?':
+			if (bootController.hasPCA9685modules) {
+				Serial.printf("Bank %d active\n", bankSelect);
+			}
+			else {
+				Serial.println(F("I2C not active, no PCA modules"));
+			}
+			break;
+		case 'E':
+			Serial.println(F("I2C activated. Now reboot."));
+			bootController.hasPCA9685modules = true;
+			bootController.isDirty = true;
+			eePutSettings();
+			break;
+		case 'X':
+			Serial.println(F("I2C deactivated. Now reboot."));
+			bootController.hasPCA9685modules = false;
+			bootController.isDirty = true;
+			eePutSettings();
+			break;
+		case '0':
+		case '1':
+		case '2':
+			//subtract 0x30
+			bankSelect = SerialBuffer[1] - 0x30;
+			Serial.printf("Bank %d active\n", bankSelect);
+			break;
 		}
+	
+	
+	
+	}
+
+
 
 
 		if (SerialBuffer[0] == 'P') {
@@ -1055,24 +1086,32 @@ void checkSerial(void) {
 				switch (vs.deviceType) {
 				case DEVICE_SENSOR:
 				case DEVICE_SENSOR_WPU:
-					Serial.print("sensor  pin ");
+					Serial.print(F("sensor  pin "));
 					Serial.print(vs.pin, DEC);
-					Serial.print("  address ");
+					Serial.print(F("  address "));
 					Serial.print(vs.address, DEC);
+					if (vs.deviceType == DEVICE_SENSOR) break;
+					Serial.print(F(" WPU "));
 					break;
 
 				case DEVICE_SERVO:
-					Serial.print("servo  pin ");
+					//special case for pin 0
+					if (vs.pin == 0) {
+						Serial.print(F("heartbeat LED pin 0"));
+						break;
+					}
+
+					Serial.print(F("servo  pin "));
 					Serial.print(vs.pin, DEC);
-					Serial.print("  address ");
+					Serial.print(F("  address "));
 					Serial.print(vs.address, DEC);
-					Serial.print("  swing ");
+					Serial.print(F("  swing "));
 					Serial.print(vs.swing, DEC);
-					Serial.print("  invert ");
+					Serial.print(F("  invert "));
 					Serial.print(vs.invert, DEC);
-					Serial.print("  continuous ");
+					Serial.print(F("  continuous "));
 					Serial.print(vs.continuous, DEC);
-					Serial.print("  rate ");
+					Serial.print(F("  rate "));
 					Serial.print(vs.rate, DEC);
 					break;
 
@@ -1140,99 +1179,6 @@ void checkSerial(void) {
 				}//end switch
 
 
-				/*block disabled
-
-				//dump this pin
-				if ((vs.deviceType==DEVICE_SENSOR)||(vs.deviceType == DEVICE_SENSOR_WPU)) {
-					Serial.print("sensor  pin ");
-					Serial.print(vs.pin, DEC);
-					Serial.print("  address ");
-
-
-				}
-				else if (vs.deviceType == DEVICE_SERVO) {
-					Serial.print("servo  pin ");
-					Serial.print(vs.pin, DEC);
-					Serial.print("  address ");
-					Serial.print(vs.address, DEC);
-					Serial.print("  swing ");
-					Serial.print(vs.swing, DEC);
-					Serial.print("  invert ");
-					Serial.print(vs.invert, DEC);
-					Serial.print("  continuous ");
-					Serial.print(vs.continuous, DEC);
-					Serial.print("  rate ");
-					Serial.print(vs.rate, DEC);
-
-				}
-				else {
-					//dump signal aspects
-					if (isMASdevice(vs)) {
-						Serial.print(F("MAS pin "));
-						Serial.print(vs.pin, DEC);
-						Serial.print(F("  address "));
-						Serial.print(vs.address, DEC);
-						Serial.print(F("  invert "));
-						Serial.print(vs.invert, DEC);
-
-						Serial.print(F("  output "));
-						switch (assertMASoutput(vs)) {
-						case 0:
-							Serial.print("0 ");
-							break;
-						case 1:
-							Serial.print("1 ");
-							break;
-
-						default:
-							Serial.print("tristate ");
-
-						}
-
-						//now the param arrays
-						bool noSpace = true;
-						for (uint8_t a = 0;a < 32;a++) {
-							if (a == 0) {
-								Serial.print(" hi[");
-								noSpace = true;
-							}
-							if (a == ASPECT_PARAMETER_SIZE - 1) {
-								Serial.print("] lo[");
-								noSpace = true;
-							}
-							if (a == (2 * ASPECT_PARAMETER_SIZE) - 1) {
-								Serial.print("] hi-flash[");
-								noSpace = true;
-							}
-							if (a == (3 * ASPECT_PARAMETER_SIZE) - 1) {
-								Serial.print("] lo-flash[");
-								noSpace = true;
-							}
-
-							if (vs.aspectParameters[a] == MAS_EMPTY_VAL) continue;
-							if (!noSpace) Serial.print(" ");
-							Serial.print(vs.aspectParameters[a], DEC);
-							noSpace = false;
-
-						}
-						Serial.print("]");
-					}
-					else
-					{
-						Serial.print(F("aspect pin "));
-						Serial.print(vs.pin, DEC);
-						Serial.print(F("  address "));
-						Serial.print(vs.address, DEC);
-						Serial.print(F("  invert "));
-						Serial.print(vs.invert, DEC);
-						Serial.print(F("  power "));
-						if (vs.ignorePowerParameter) { Serial.print("x"); }
-						else { Serial.print(vs.power, DEC); }
-					}
-				}
-
-				*/
-
 				
 					//dump output state
 					switch (vs.state) {
@@ -1257,9 +1203,9 @@ void checkSerial(void) {
 					}
 				
 					//DEBUG state attach status
-					if (ESPservoIsAttached(vs.pin)) {
-						Serial.print(" AT ");
-					}else{ Serial.print(" U "); }
+					//if (ESPservoIsAttached(vs.pin)) {
+						//Serial.print(" AT ");
+					//}else{ Serial.print(" U "); }
 
 
 				Serial.print("\n");
@@ -1586,7 +1532,7 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 			//flash low
 			if (vs.aspectParameters[a] == vs.MASstate) {
 				//assert low gated with ledState == low, this allows flash lo/hi to work on the same pin
-				if (!ledState) outputState = LO;
+				if (!heartbeatLEDstate) outputState = LO;
 			}
 			break;
 
@@ -1594,7 +1540,7 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 			//flash high
 			if (vs.aspectParameters[a] == vs.MASstate) {
 				//assert hi gated with ledState == high, this allows flash lo/hi to work on the same pin
-				if (ledState) outputState = HI;
+				if (heartbeatLEDstate) outputState = HI;
 			}
 			break;
 
@@ -1710,6 +1656,7 @@ void eeGetSettings(void) {
 		eeAddr += sizeof(virtualservoCollection);
 		Serial.print(F("EEPROM="));
 		Serial.println(eeAddr, DEC);
+		bankSelect = 0;  //select bank 0 on startup
 
 		//initialise the pin assignments move all servos and aspects to closed position
 		int i = 0;
@@ -2054,18 +2001,26 @@ void processServo(void) {
 
 			if ((vs.state == SENSOR_HIGH) && (vs.position == 0)) {
 					//declare low
-					//os_timer_disarm(&servoTimer);
 					nsLOCONETaccessoryProcessor::sensorEvent(vs.address,false);
 					vs.state = SENSOR_LOW;
-					//os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
 			}
 
 			if ((vs.state == SENSOR_LOW) && (vs.position == 0xFF)){
-					//os_timer_disarm(&servoTimer);
 					nsLOCONETaccessoryProcessor::sensorEvent(vs.address, true);
 					vs.state = SENSOR_HIGH;
-					//os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
 			}
+			break;
+
+		case HEARTBEAT_HIGH:
+			//convention is heartbeatLEDstate is activelow
+			if (heartbeatLEDstate) break;
+			digitalWrite(gpioPin, HIGH);
+			vs.state = HEARTBEAT_LOW;
+			break;
+		case HEARTBEAT_LOW:
+			if (!heartbeatLEDstate) break;
+			digitalWrite(gpioPin, LOW);
+			vs.state = HEARTBEAT_HIGH;
 			break;
 
 		case SERVO_BOOT:
@@ -2080,7 +2035,9 @@ void processServo(void) {
 				case DEVICE_SENSOR:
 				case DEVICE_SENSOR_WPU:
 					ESPservoAttach(vs.pin, false);
-					pinMode(gpioPin, INPUT);
+					if  (vs.deviceType== DEVICE_SENSOR_WPU)
+					{ pinMode(gpioPin,INPUT_PULLUP); }
+					else{ pinMode(gpioPin, INPUT); }
 					vs.position = 0xFF;  //spoof a high input state
 					vs.state = SENSOR_HIGH;
 					vsBoot = nullptr;
@@ -2088,6 +2045,15 @@ void processServo(void) {
 					break;
 
 				case DEVICE_SERVO:
+					//special case for pin0. This cannot operate as a servo so instead make it a heartbeat indicator
+					if (vs.pin == 0) {
+						vs.state = HEARTBEAT_HIGH;   //DEBUG DISABLE
+						pinMode(gpioPin, OUTPUT);
+						vsBoot = nullptr;
+						bootTimer = 0;
+						//break;
+					}
+
 					vs.position = vs.invert ? maxPosition : minPosition;
 					ESPservoAttach(vs.pin, true);
 					ESPservoWrite(vs.pin, vs.position);
@@ -2113,7 +2079,7 @@ void processServo(void) {
 				//timed out?
 				if (bootTimer == 0) {
 					vs.state = SERVO_CLOSED;
-					Serial.print(F("pin booted"));
+					Serial.print(F("pin booted "));
 					Serial.println(vs.pin, DEC);
 					//release for next vs to boot
 					vsBoot = nullptr;

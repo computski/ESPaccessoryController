@@ -1,6 +1,37 @@
-// IMPORTANT: GPIO16 is part of the RTC module, and cannot be controlled via out_w1ts/out_w1tc
-// 
-// 
+
+/*
+IMPORTANT: GPIO16 is part of the RTC module, and cannot be controlled via out_w1ts/out_w1tc
+
+NodeMCU hardware SZDOIT motor board
+https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
+D0 GPIO16
+D1 GPIO5 PWMA
+D2 GPIO4 PWMB
+D3 GPIO0 dir A (12k pullup, flash button, boot fails if low)
+D4 GPIO2 dir B (12k pullup, boot fails if low)
+D5 GPIO14
+D6 GPIO12
+D7 GPIO13
+D8 GPIO15 (12k pulldown, boot fails if hi)
+
+In general, servos respond to hi pulses, and a continuous hi (pin condition at boot) might drive the servo to one extreme.
+Therefore its better to use pulled-down pins or pure outputs for servo control.  Also if you intend to use a pin
+as a sensor input, the default state (eg hi or lo) must not interfere with the boot pin level requirements.  i.e. 
+boot requires D3 and 4 to be high, and D8 to be low.  Typically sensors are active-lo.
+
+// Sets GPIO16 (RTC_GPIO0) HIGH
+uint32_t reg_val = *((volatile uint32_t *)0x60000700);
+reg_val |= (1 << 0);
+*((volatile uint32_t *)0x60000700) = reg_val;
+
+// Sets GPIO16 (RTC_GPIO0) LOW
+uint32_t reg_val = *((volatile uint32_t *)0x60000700);
+reg_val &= ~(1 << 0);
+*((volatile uint32_t *)0x60000700) = reg_val;
+
+
+
+*/
 
 
 
