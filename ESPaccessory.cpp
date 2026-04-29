@@ -56,11 +56,11 @@ each PCA can then have 16 pins
 
 NodeMCU hardware SZDOIT board
 https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
-D0 GPIO16
+D0 GPIO16 (also on-board LED active low)
 D1 GPIO5 PWMA
 D2 GPIO4 PWMB
 D3 GPIO0 dir A (WPU, flash button, boot fails if low)
-D4 GPIO2 dir B (WPU, boot fails if low)
+D4 GPIO2 dir B (WPU, boot fails if low. Also on-module LED, active low)
 D5 GPIO14 
 D6 GPIO12
 D7 GPIO13
@@ -147,6 +147,7 @@ enum RELAY {
 unsigned long previousMillis;
 unsigned long interval;
 bool heartbeatLEDstate = true;
+bool MASledState = true;
 
 static os_timer_t hearbeatTimer;
 
@@ -1532,7 +1533,7 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 			//flash low
 			if (vs.aspectParameters[a] == vs.MASstate) {
 				//assert low gated with ledState == low, this allows flash lo/hi to work on the same pin
-				if (!heartbeatLEDstate) outputState = LO;
+				if (!MASledState) outputState = LO;
 			}
 			break;
 
@@ -1540,7 +1541,7 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 			//flash high
 			if (vs.aspectParameters[a] == vs.MASstate) {
 				//assert hi gated with ledState == high, this allows flash lo/hi to work on the same pin
-				if (heartbeatLEDstate) outputState = HI;
+				if (MASledState) outputState = HI;
 			}
 			break;
 
@@ -1589,12 +1590,41 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 
 
 
+void nsESPaccessory::commandTurnout(int16_t addr, bool thrown) {
+	//find all aspects and servos with addr, and assert thrown state
+	for (auto& vs : virtualservoCollection) {
+		if (vs.address != addr) continue;
+		switch (vs.deviceType) {
+		case DEVICE_SERVO:
+			vs.state = thrown ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
+			break;
+		case DEVICE_ASPECT:
+			vs.state = thrown ? ASPECT_THROWN : ASPECT_CLOSED;
+			break;
+		}
+	}
+	if (verbose) {
+		Serial.printf("address %d ", addr);
+		if (thrown) {
+			Serial.println("thrown");
+		}
+		else {
+			Serial.println("closed");
+		}
+	}
+}
+
+void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {
+	//find all MAS with addr, and assert new state
+	for (auto& vs : virtualservoCollection) {
+		if (vs.address != addr) continue;
+		if (vs.deviceType != DEVICE_MAS) continue;
+		//set the new state, processServo() will act on this
+		vs.MASstate = state;
+	}
+}
 
 
-
-
-void nsESPaccessory::commandTurnout(int16_t addr, bool thrown) {}
-void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {}
 bool nsESPaccessory::pollSensor(int16_t addr) { return true; }
 
 
@@ -1876,12 +1906,19 @@ bool nsESPaccessory::getVerbose(void) {
 void processServo(void) {
 	static VIRTUALSERVO* vsBoot = nullptr;
 	static uint8_t bootTimer = 0;
+	static uint8_t tick;
 	
 	//IMPORTANT: vs.pin does represent the GPIO pin and not the ordinal in the virtualServoCollection
 
 
-	//1 sec count block here
-	MAScommandSync = true;
+	if (tick++ > 33) {
+		//0.5sec counter used to toggle MAS leds and also sync to the edge
+		tick = 0;
+		MAScommandSync = true;
+	}
+
+
+	
 
 	//in normal non-invert mode, minPosition is turnout closed, and maxPosition is turnout thrown
 	//for signal aspects, we move from ASPECT_CLOSED or ASPECT_THROWN straight to the antiphase, and we heed the .power parameter
