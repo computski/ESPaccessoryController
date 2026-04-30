@@ -123,7 +123,7 @@ void nsLOCONETaccessoryProcessor::tokenProcessor(char* msg, AsyncClient* client)
 		switch (tokens[0]) {
 			
 		case OPC_SW_REP://request a sensor status, decays to 0xB2 handler.  Panel Pro sends B2 instead of B1
-		case OPC_INPUT_REP:  //report a sensor status
+		case OPC_INPUT_REP:  //report a sensor status, i.e. an asynchronous event on a sensor
 			/* <0xB2>,<SN1>,<SN2>,<CHK>*/
 			/* <0xB1>,<SN1>,<SN2>,<CHK> SENSOR state REPORT  NO feedback
 <SN1> =<0,A6,A5,A4- A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
@@ -155,16 +155,18 @@ this <B1> opcode encodes current OUTPUT levels
 						Serial.printf("sensor %d\n", addr);
 					};
 
-				//call out to the hardware
+				//call out to the hardware. Preempt a L=0 response
+					tokens[2] &= 0b01101111;  
+					tokens[2] += nsESPaccessory::pollSensor(addr) ? 0b10000 : 0;
+
+					//recalculate checksum
+					tokens[3] = 0xFF ^ tokens[2] ^ tokens[1] ^ tokens[0];
+					snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", tokens[0], tokens[1], tokens[2], tokens[3]);
+					nsESPaccessory::queueMessage(buf);
 					
 			}
-
-			//DO SOMETHING...
-			//Remember we also want to send RECIEVE B2 messages on sensor changes
-
-
-			break;
-
+			return;
+			
 
 		case OPC_SW_REQ:
 			/*Command a turnout.

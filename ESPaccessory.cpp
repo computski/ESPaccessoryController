@@ -950,7 +950,8 @@ void checkSerial(void) {
 						if (vs.deviceType != DEVICE_MAS) continue;
 						vs.MASstate = state;
 						MAScommandSync = false;
-						if (verbose) Serial.println(assertMASoutput(vs), DEC);
+						assertMASoutput(vs);
+						if (verbose) Serial.printf("Mas to %d\n",state);
 					}
 					break;
 				}
@@ -958,7 +959,7 @@ void checkSerial(void) {
 				if (!resolved) break;
 			}
 
-			if (resolved && (i >= 3)) Serial.println("OK");
+			if (resolved && (i >= 3)) Serial.println("OK MAS");
 		}
 
 		//SENSOR command. sets up a sensor on a given pin, by default will be WPU a zero param is given
@@ -1625,7 +1626,15 @@ void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {
 }
 
 
-bool nsESPaccessory::pollSensor(int16_t addr) { return true; }
+bool nsESPaccessory::pollSensor(int16_t addr) {
+	for (auto vs : virtualservoCollection) {
+		if (vs.address != addr) continue;
+		if (vs.deviceType != DEVICE_SENSOR) continue;
+		return digitalRead(NodeMCUmap[vs.pin]);
+	}
+	
+	return true; 
+}
 
 
 
@@ -1900,9 +1909,10 @@ bool nsESPaccessory::getVerbose(void) {
 
 
 
-//PROCESS SERVO POSITIONS AND SIGNAL ASPECTS
-//processServo() is called at 15ms intervals from a timer
 
+/// <summary>
+/// PROCESS SERVO POSITIONS AND SIGNAL ASPECTS.  Call every 15mS from a timer.
+/// </summary>
 void processServo(void) {
 	static VIRTUALSERVO* vsBoot = nullptr;
 	static uint8_t bootTimer = 0;
@@ -1915,6 +1925,7 @@ void processServo(void) {
 		//0.5sec counter used to toggle MAS leds and also sync to the edge
 		tick = 0;
 		MAScommandSync = true;
+		MASledState = !MASledState;
 	}
 
 
