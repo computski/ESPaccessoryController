@@ -254,6 +254,7 @@ static void handleData(void* arg, AsyncClient* client, void* data, size_t len);
 void onConnect(void* arg, AsyncClient* client);
 void onDisconnect(void* arg, AsyncClient* client);
 void bootTCP(void);
+void bootTCPasServer(void);
 void stringIPtoArray(char* s, uint8_t* myIP);
 void eeGetSettings(void);
 void eePutSettings(void);
@@ -334,7 +335,8 @@ thing:
 	WiFi.setAutoReconnect(true);
 	Serial.print("Wifi Connected, IP address: ");
 	Serial.println(WiFi.localIP().toString());
-	bootTCP();
+	//bootTCP();
+	bootTCPasServer();
 
 
 	//https://sub.nanona.fi/esp8266/hello-world.html
@@ -1839,10 +1841,34 @@ void bootTCP(void) {
 	//this timer is not triggered yet, see on_timer_arm()
 	//make sense as there is no point arming it until we are connected
 	
-
 }
 
 
+
+#pragma region "...TCP SERVER..."
+static void handleNewClient(void* arg, AsyncClient* client) {
+	if (verbose) { Serial.printf("\nnew client ip: %s", client->remoteIP().toString().c_str()); }
+	
+
+	// register events
+	client->onData(&handleData, NULL);   //can use the same handle data routine as when we are a client
+	clientX = client;  //this should work
+	//client->onError(&handleError, NULL);
+	//client->onDisconnect(&handleDisconnect, NULL);
+	//client->onTimeout(&handleTimeOut, NULL);
+}
+
+void bootTCPasServer(void) {
+	//hold on, what's the wifi IP, so if we connect as 114 then the port below should be the same.
+	//how did we do this in the controller? Actually you don't provide an IP, you provide a port.
+
+
+	AsyncServer* server = new AsyncServer(bootController.tcpPort); // start listening on tcp port
+	server->onClient(&handleNewClient, server);
+	server->begin();
+	Serial.println("boot as server");
+}
+#pragma endregion
 
 
 void sendEnqueuedMessages() {
