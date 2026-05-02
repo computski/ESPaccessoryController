@@ -86,11 +86,6 @@ const uint8_t NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
 void processServo(void);
 
 
-
-
-
-
-
 #define TRACE
 
 #ifndef TRACE
@@ -106,15 +101,15 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260410;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260413;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
-	char AP_IP[17] = "192.168.6.1\0";   //note the actual setting requires comma separators
+	char AP_IP[17] = "192.168.6.2\0";   //note the actual setting requires comma separators
 	char STA_SSID[21] = "Ossonet\0";  //SSID when running as a station on an external WiFi network
 	char STA_pwd[21] = "11223344AA\0";			//pwd for station
 	char tcpIP[17] = "192.168.1.118\0";   //target IP of CONTROLLER to connect to
 	uint16_t tcpPort = 1234;       //tcp port
-	char Mode[2] = "C";  //C denotes client, S server and L as standalone wifi server
+	char Mode = 'S';  //C denotes client, S server and L as standalone wifi server
 	bool hasPCA9685modules = false; //denotes PCA modules are present
 	bool isDirty = false;  //will be true if EEPROM needs to be written
 };
@@ -124,9 +119,8 @@ uint8_t bankSelect = 0;
 
 /*Modes;
 * C: connect via wifi to STA SSID and act as a client 
-* S: connect via wifi to STA SSID and act as a server
-* L: act as a standalone wifi AP and act as a server
-
+* S: connect via wifi to STA SSID and act as a loconet server
+* L: act as a standalone wifi AP and act as a loconet server
 */
 
 
@@ -138,10 +132,13 @@ static std::vector<std::string> messages;
 
 enum RELAY {
 	S_BOOT,
+	S_BOOT_WIFI_STA_LOCONET_HOST,
+	S_BOOT_WIFI_STA_LOCONET_CLIENT,
+	S_BOOT_WIFI_AP_LOCONET_HOST,
 	S_FAULT,
-	S_TCP_CONNECTED,
-	S_TCP_RECONNECT,
-	S_TCP_PENDING_CONNECT
+	S_TCP_CONNECTED_AS_CLIENT,
+	S_TCP_RECONNECT_AS_CLIENT,
+	S_TCP_PENDING_CONNECT_AS_CLIENT
 };
 
 unsigned long previousMillis;
@@ -253,8 +250,8 @@ static void heartbeat(void* arg);
 static void handleData(void* arg, AsyncClient* client, void* data, size_t len);
 void onConnect(void* arg, AsyncClient* client);
 void onDisconnect(void* arg, AsyncClient* client);
-void bootTCP(void);
-void bootTCPasServer(void);
+void bootTCPclient(void);
+void bootTCPserver(void);
 void stringIPtoArray(char* s, uint8_t* myIP);
 void eeGetSettings(void);
 void eePutSettings(void);
@@ -302,42 +299,84 @@ void nsESPaccessory::ESPaccessorySetup() {
 	verbose = false;
 	eeGetSettings();
 	
-
 	//DEBUG
 	verbose = true;
 
-
-	//pinMode(16, OUTPUT);  //LED sits on D0
-
-	deviceState = S_BOOT;
-	
-	
-thing:
-	// connects to access point
-	WiFi.mode(WIFI_STA);
-	WiFi.setHostname("ESPACC");
-
 	Serial.println(F("For help use ?"));
-	Serial.printf("Connecting to Wifi %s", bootController.STA_SSID);
 
-	WiFi.begin(bootController.STA_SSID, bootController.STA_pwd);
 
-	long dotTimer = millis();
-
-	while (WiFi.status() != WL_CONNECTED) {
-		checkSerial();
-		if (millis() - dotTimer >= 500) {
-			Serial.print('.');
-			dotTimer = millis();
+	//choose boot mode
+	switch (bootController.Mode) {
+	case 'C':
+		//boot as a client on building wifi, to interwork with my ESP_DCC_Controller project
+		deviceState = S_BOOT_WIFI_STA_LOCONET_CLIENT;
+		WiFi.mode(WIFI_STA);
+		WiFi.setHostname("ESPACC");
+		Serial.printf("Connecting to Wifi %s", bootController.STA_SSID);
+		WiFi.begin(bootController.STA_SSID, bootController.STA_pwd);
+		break;
+	case 'L':
+		//boot as a complete standalone AP running a loconet server
+		{//scope block
+		deviceState = S_BOOT_WIFI_AP_LOCONET_HOST;
+		WiFi.mode(WIFI_AP);
+		WiFi.setHostname("ESPACC");
+		//wait for the softAP to start, then set the ip address
+		delayMicroseconds(500);
+		//IPAddress class requires the address to be provided as 4 octets
+		uint8_t apIP[4];
+		stringIPtoArray(bootController.AP_IP, apIP);
+		IPAddress Ip(apIP[0], apIP[1], apIP[2], apIP[3]);
+		IPAddress NMask(255, 255, 255, 0);
+		WiFi.softAPConfig(Ip, Ip, NMask);  //static IP, gateway, subnet
+		WiFi.softAP(bootController.AP_SSID, bootController.AP_pwd);
+		Serial.print(F("AP started "));
+		Serial.println(WiFi.softAPIP().toString());
 		}
+		break;
+	case 'S':
+	default:
+		//boot as a loconet server on the building wifi
+		deviceState = S_BOOT_WIFI_AP_LOCONET_HOST;
+		WiFi.mode(WIFI_STA);
+		WiFi.setHostname("ESPACC");
+		Serial.printf("Connecting to Wifi %s", bootController.STA_SSID);
+		WiFi.begin(bootController.STA_SSID, bootController.STA_pwd);
 	}
-	//want the ESP to auto reconnect the WiFi if it fails
-	WiFi.setAutoReconnect(true);
-	Serial.print("Wifi Connected, IP address: ");
-	Serial.println(WiFi.localIP().toString());
-	//bootTCP();
-	bootTCPasServer();
 
+	//for wifi client modes, wait for connection
+
+	switch (bootController.Mode) {
+	case 'L':  //standalone system
+		bootTCPserver();
+		break;
+
+	case 'C':	//loconet client on home Wifi
+	case 'S':   //loconet server on home Wifi
+	default:    //loconet server on home Wifi
+		long dotTimer = millis();
+		while (WiFi.status() != WL_CONNECTED) {
+			checkSerial();
+			if (millis() - dotTimer >= 500) {
+				Serial.print('.');
+				dotTimer = millis();
+			}
+		}
+		//want the ESP to auto reconnect the WiFi if it fails
+		WiFi.setAutoReconnect(true);
+		Serial.print("Wifi Connected, IP address: ");
+		Serial.println(WiFi.localIP().toString());
+		if (bootController.Mode == 'C') {
+			bootTCPclient();
+		}
+		else {
+			bootTCPserver();
+		}
+		break;
+		
+	}
+
+	
 
 	//https://sub.nanona.fi/esp8266/hello-world.html
 	os_timer_setfn(&servoTimer, (os_timer_func_t*)processServo, NULL);
@@ -355,7 +394,7 @@ void nsESPaccessory::ESPaccessoryLoop() {
 	switch (deviceState) {
 	case S_FAULT:
 		break;
-	case S_TCP_CONNECTED:
+	case S_TCP_CONNECTED_AS_CLIENT:
 		//flash led 0.2 sec on, 5 off
 		if (currentMillis - previousMillis >= interval) {
 			//digitalWrite(16, ledState);  //led is active low, false=on    DEBUG disable
@@ -365,12 +404,12 @@ void nsESPaccessory::ESPaccessoryLoop() {
 		}
 		break;
 
-	case S_TCP_RECONNECT:
-		bootTCP();
-		deviceState = S_TCP_PENDING_CONNECT;
+	case S_TCP_RECONNECT_AS_CLIENT:
+		bootTCPclient();
+		deviceState = S_TCP_PENDING_CONNECT_AS_CLIENT;
 		break;
 
-	case S_TCP_PENDING_CONNECT:
+	case S_TCP_PENDING_CONNECT_AS_CLIENT:
 		//we kicked off ONE new attempt at a connect
 		//flash led 1 sec on/off
 		if (currentMillis - previousMillis >= 1000) {
@@ -394,6 +433,175 @@ void nsESPaccessory::ESPaccessoryLoop() {
 
 }// end main loop
 
+#pragma region "...TCP..."
+
+//called every 10 sec from intervalTimer
+//it sends a heartbeat message when acting as a TCP client
+static void heartbeat(void* arg) {
+	if (deviceState != S_TCP_CONNECTED_AS_CLIENT) return;
+	AsyncClient* client = reinterpret_cast<AsyncClient*>(arg);
+	queueMessage("ESPACC\n\0");
+}
+
+//event callback for TCP inbound data whether we are in server or client mode
+static void handleData(void* arg, AsyncClient* client, void* data, size_t len) {
+	if (verbose) {
+		trace(Serial.printf("\n%d bytes from server %s \n", len, client->remoteIP().toString().c_str());)
+			Serial.print("IN: ");
+		Serial.write((uint8_t*)data, len);  //write the bytes as received
+	}
+
+	//uint8_t* ptr = (uint8_t*)data;
+	nsLOCONETaccessoryProcessor::handleLocoNet(arg, client, data, len);
+}
+
+void onConnect(void* arg, AsyncClient* client) {
+	//Serial.printf("\n client has been connected to %s on port %d \n", SERVER_HOST_NAME, TCP_PORT);
+	//in client mode, this is us connecting to the host
+	//in host mode, this is a new client connecting to us.
+
+
+	if (bootController.Mode == 'C') {
+		Serial.printf("\nclient connected to %s on port %d \n", TCPserverIP.toString().c_str(), bootController.tcpPort);
+		deviceState = S_TCP_CONNECTED_AS_CLIENT;
+		heartbeat(client);
+		clientX = client;
+		os_timer_arm(&hearbeatTimer, 10000, true); // schedule for reply to server at next 10s
+
+	}
+	else {
+		//we are the host, and the client has a remoteIP
+		Serial.printf("\nclient connection from %s\n", client->remoteIP());;
+		clientX = client;
+	}
+
+}
+
+void onDisconnect(void* arg, AsyncClient* client) {
+	Serial.printf("\nclient disconnected\n");
+	if (bootController.Mode == 'C') {
+		deviceState = S_TCP_RECONNECT_AS_CLIENT;
+		os_timer_disarm(&hearbeatTimer);
+		clientX = nullptr;
+	}
+	else {
+		//we are the host so no need to nullptr clientX which is our server
+		Serial.printf("\nremote client disconnected\n");
+		os_timer_disarm(&hearbeatTimer);
+		clientX = nullptr;
+	}
+
+}
+
+void bootTCPclient(void) {
+	uint8_t myIP[4];
+	stringIPtoArray(bootController.tcpIP, myIP);
+	TCPserverIP = IPAddress(myIP);
+
+	Serial.printf("Attempt connect to TCP server %s on port %d\n", TCPserverIP.toString().c_str(), bootController.tcpPort);
+
+	AsyncClient* client = new AsyncClient;
+	client->onData(&handleData, client);
+	client->onConnect(&onConnect, client);
+
+	//client->onError(&onError, client);
+	client->onDisconnect(&onDisconnect, client);
+
+	client->connect(TCPserverIP, bootController.tcpPort);
+
+	//does it reconnect automatically? NO.  You need to destroy object by setting a nullptr;
+	//onDisconnect, then you can open a new client which will sit and wait for the server to reappear
+
+
+	os_timer_disarm(&hearbeatTimer);
+	os_timer_setfn(&hearbeatTimer, &heartbeat, client);
+	//this timer is not triggered yet, see on_timer_arm()
+	//make sense as there is no point arming it until we are connected
+
+}
+
+
+
+#pragma region "...TCP SERVER..."
+static void handleNewClient(void* arg, AsyncClient* client) {
+	if (verbose) { Serial.printf("\nnew client ip: %s", client->remoteIP().toString().c_str()); }
+
+	// register events
+	client->onData(&handleData, NULL);   //can use the same handle data routine as when we are a client
+	clientX = client;  //this should work
+	//client->onError(&handleError, NULL);
+	//client->onDisconnect(&handleDisconnect, NULL);
+	//client->onTimeout(&handleTimeOut, NULL);
+}
+
+void bootTCPserver(void) {
+	//hold on, what's the wifi IP, so if we connect as 114 then the port below should be the same.
+	//how did we do this in the controller? Actually you don't provide an IP, you provide a port.
+
+	AsyncServer* server = new AsyncServer(bootController.tcpPort); // start listening on tcp port
+	server->onClient(&handleNewClient, server);
+	server->begin();
+	Serial.println(F("boot as LOCONET server"));
+}
+#pragma endregion
+
+
+void sendEnqueuedMessages() {
+	if (messages.size() == 0) return;
+	std::string jumboMessage;
+
+	for (auto m : messages) {
+		jumboMessage.append(m);
+	}
+
+	//2026-04-22 bug fix, if you queue messages but there's no client, the block below will cause a crash
+	if (!clientX) {
+		messages.clear();
+		return;
+	}
+
+	if (jumboMessage.size() > 0) {
+		char* data = new char[jumboMessage.size() + 1];
+		copy(jumboMessage.begin(), jumboMessage.end(), data);
+		data[jumboMessage.size()] = '\0';
+
+		if (clientX->space() > sizeof(data) && clientX->canSend()) {
+			clientX->add(data, strlen(data));
+			clientX->send();
+
+			if (verbose) {}//needs to be verbose and capture the serial lines
+			Serial.print("OUT: ");
+			Serial.write(jumboMessage.c_str());
+			messages.clear();
+		}
+		//we used new to create *data.  delete now else you create a memory leak
+		delete data;
+	}
+
+}
+
+
+void stringIPtoArray(char* s, uint8_t* myIP) {
+	//IPAddress class requires the address to be provided as 4 octets
+	char* p = nullptr;
+	char ipBoot[17];
+	strcpy(ipBoot, s);
+
+	//strtok modifies its arguement, have to use a copy.
+	p = strtok((char*)ipBoot, ",.");
+	int i = 0;
+	while (p != NULL) {
+		myIP[i] = strtol(p, NULL, 10);
+		i++;
+		if (i == 4) break;
+		//more data?
+		p = strtok(NULL, ",.");
+	}
+	return;
+}
+
+
+#pragma endregion
 
 #pragma region "...SERIAL ROUTINES..."
 
@@ -517,14 +725,32 @@ void checkSerial(void) {
 		}
 
 		if (SerialBuffer[0] == 'X') {
-			//dump IP set up
+			//wifi and IP configs
 			Serial.printf("\nSoftware ver %d\n", bootController.softwareVersion);
 			Serial.print("MAC ");
 			Serial.println(WiFi.macAddress());  // %s in printf does not work
-			Serial.printf("Network SSID %s\n", bootController.STA_SSID);
-			Serial.printf("Server IP %s\n", bootController.tcpIP);
-			Serial.printf("Server port %d\n\n", bootController.tcpPort);
 
+			switch (bootController.Mode) {
+			case 'S':
+				Serial.printf("Network SSID %s\n", bootController.STA_SSID);
+				Serial.println(F("Running as LocoNet HOST"));
+				Serial.print(F("Loconet server IP "));
+				Serial.println(WiFi.localIP().toString());
+				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
+				break;
+			case 'L':
+				Serial.println(F("Running as standalone LocoNet HOST"));
+				Serial.printf("SSID %s\n", bootController.AP_SSID);
+				Serial.print(F("LocoNet server IP "));
+				Serial.println(WiFi.softAPIP().toString());
+				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
+				break;
+			case 'C':
+				Serial.printf("Network SSID %s\n", bootController.STA_SSID);
+				Serial.println(F("Running as LocoNet CLIENT"));
+				Serial.printf("Loconet server IP %s\n", bootController.tcpIP);
+				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
+			}
 		}
 
 		if (SerialBuffer[0] == 'S') {
@@ -588,22 +814,30 @@ void checkSerial(void) {
 			switch (SerialBuffer[1])
 			{
 			case 'S':
-				bootController.Mode[0] = 'S';
-				Serial.println(F("Server mode on home Wifi set\n"));
+				bootController.Mode = 'S';
+				Serial.println(F("LocoNet HOST on home Wifi set\n"));
 				break;	
 			case 'L':
-				bootController.Mode[0] = 'L';
-				Serial.println(F("Stand alone Server set\n"));
+				bootController.Mode = 'L';
+				Serial.println(F("Stand alone LocoNet HOST set\n"));
 				break;
 			case 'C':
-				bootController.Mode[0] = 'C';
-				Serial.println(F("Client mode on home Wifi set\n"));
+				bootController.Mode = 'C';
+				Serial.println(F("LocoNet CLIENT on home Wifi set\n"));
 				break;
 			case '?':
 			default:
-				Serial.printf("Current mode: %s\n", bootController.Mode[0]);
 				bootController.isDirty = false;
-				break;
+				switch (bootController.Mode) {
+				case 'S':
+					Serial.println(F("S: LocoNet HOST on home Wifi\n"));
+					break;
+				case'L':
+					Serial.println(F("L: Stand alone LocoNet HOST\n"));
+					break;
+				case'C':
+					Serial.println(F("C: LocoNet CLIENT on home Wifi\n"));
+				}
  			}
 
 			if (bootController.isDirty) {
@@ -1770,163 +2004,6 @@ static void watchdogFail(void) {
 #pragma endregion
 
 
-
-#pragma region "...TCP..."
-
-//called every 10 sec from intervalTimer
-//it sends a heartbeat message
-static void heartbeat(void* arg) {
-	AsyncClient* client = reinterpret_cast<AsyncClient*>(arg);
-	queueMessage("ESPACC\n\0");
-
-}
-
-//event callback for TCP inbound data
-static void handleData(void* arg, AsyncClient* client, void* data, size_t len) {
-	if (verbose) {
-		
-		trace(Serial.printf("\n%d bytes from server %s \n", len, client->remoteIP().toString().c_str());)
-		Serial.print("IN: ");
-		Serial.write((uint8_t*)data, len);  //write the bytes as received
-
-	}
-	
-	//uint8_t* ptr = (uint8_t*)data;
-
-	nsLOCONETaccessoryProcessor::handleLocoNet(arg, client, data, len);
-
-}
-
-void onConnect(void* arg, AsyncClient* client) {
-	//Serial.printf("\n client has been connected to %s on port %d \n", SERVER_HOST_NAME, TCP_PORT);
-	Serial.printf("\n client has been connected to %s on port %d \n", TCPserverIP.toString().c_str(), bootController.tcpPort);
-	deviceState = S_TCP_CONNECTED;
-	heartbeat(client);
-	clientX = client;
-
-	os_timer_arm(&hearbeatTimer, 10000, true); // schedule for reply to server at next 10s
-
-}
-
-void onDisconnect(void* arg, AsyncClient* client) {
-	Serial.printf("\n client has disconnected\n");
-	deviceState = S_TCP_RECONNECT;
-	os_timer_disarm(&hearbeatTimer);
-	clientX = nullptr;
-}
-
-void bootTCP(void) {
-	uint8_t myIP[4];
-	stringIPtoArray(bootController.tcpIP, myIP);
-	TCPserverIP = IPAddress(myIP);
-
-
-	Serial.printf("Attempt connect to TCP server %s on port %d\n", TCPserverIP.toString().c_str(), bootController.tcpPort);
-
-	AsyncClient* client = new AsyncClient;
-	client->onData(&handleData, client);
-	client->onConnect(&onConnect, client);
-
-	//client->onError(&onError, client);
-	client->onDisconnect(&onDisconnect, client);
-
-	client->connect(TCPserverIP, bootController.tcpPort);
-
-	//does it reconnect automatically? NO.  You need to destroy object by setting a nullptr;
-	//onDisconnect, then you can open a new client which will sit and wait for the server to reappear
-
-
-	os_timer_disarm(&hearbeatTimer);
-	os_timer_setfn(&hearbeatTimer, &heartbeat, client);
-	//this timer is not triggered yet, see on_timer_arm()
-	//make sense as there is no point arming it until we are connected
-	
-}
-
-
-
-#pragma region "...TCP SERVER..."
-static void handleNewClient(void* arg, AsyncClient* client) {
-	if (verbose) { Serial.printf("\nnew client ip: %s", client->remoteIP().toString().c_str()); }
-	
-
-	// register events
-	client->onData(&handleData, NULL);   //can use the same handle data routine as when we are a client
-	clientX = client;  //this should work
-	//client->onError(&handleError, NULL);
-	//client->onDisconnect(&handleDisconnect, NULL);
-	//client->onTimeout(&handleTimeOut, NULL);
-}
-
-void bootTCPasServer(void) {
-	//hold on, what's the wifi IP, so if we connect as 114 then the port below should be the same.
-	//how did we do this in the controller? Actually you don't provide an IP, you provide a port.
-
-
-	AsyncServer* server = new AsyncServer(bootController.tcpPort); // start listening on tcp port
-	server->onClient(&handleNewClient, server);
-	server->begin();
-	Serial.println("boot as server");
-}
-#pragma endregion
-
-
-void sendEnqueuedMessages() {
-	if (messages.size() == 0) return;
-	std::string jumboMessage;
-
-	for (auto m : messages) {
-		jumboMessage.append(m);
-	}
-
-	//2026-04-22 bug fix, if you queue messages but there's no client, the block below will cause a crash
-	if (!clientX) {
-		messages.clear();
-		return;
-	}
-
-	if (jumboMessage.size() > 0) {
-		char* data = new char[jumboMessage.size() + 1];
-		copy(jumboMessage.begin(), jumboMessage.end(), data);
-		data[jumboMessage.size()] = '\0';
-
-		if (clientX->space() > sizeof(data) && clientX->canSend()) {
-			clientX->add(data, strlen(data));
-			clientX->send();
-
-			if (verbose) {}//needs to be verbose and capture the serial lines
-			Serial.print("OUT: ");
-			Serial.write(jumboMessage.c_str());
-			messages.clear();
-		}
-		//we used new to create *data.  delete now else you create a memory leak
-		delete data;
-	}
-
-}
-
-void stringIPtoArray(char* s, uint8_t* myIP) {
-	//IPAddress class requires the address to be provided as 4 octets
-	//uint8_t myIP[4];
-	char* p = nullptr;
-	char ipBoot[17];
-	strcpy(ipBoot, s);
-
-	//strtok modifies its arguement, have to use a copy.
-	p = strtok((char*)ipBoot, ",.");
-	int i = 0;
-	while (p != NULL) {
-		myIP[i] = strtol(p, NULL, 10);
-		i++;
-		if (i == 4) break;
-		//more data?
-		p = strtok(NULL, ",.");
-	}
-	return;
-}
-
-
-#pragma endregion
 
 bool nsESPaccessory::getVerbose(void) {
 	return verbose;
