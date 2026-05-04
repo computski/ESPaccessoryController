@@ -131,7 +131,6 @@ AsyncClient* clientX; //points to currently active client
 static std::vector<std::string> messages;
 
 enum RELAY {
-	S_BOOT,
 	S_BOOT_WIFI_STA_LOCONET_HOST,
 	S_BOOT_WIFI_STA_LOCONET_CLIENT,
 	S_BOOT_WIFI_AP_LOCONET_HOST,
@@ -141,8 +140,7 @@ enum RELAY {
 	S_TCP_PENDING_CONNECT_AS_CLIENT
 };
 
-unsigned long previousMillis;
-unsigned long interval;
+
 bool heartbeatLEDstate = true;
 bool MASledState = true;
 
@@ -152,7 +150,7 @@ static os_timer_t servoTimer;
 #define SERVO_TIMEOUT 15  //15ms
 
 
-static uint8_t deviceState = S_BOOT;
+static uint8_t deviceState = S_BOOT_WIFI_AP_LOCONET_HOST;
 
 
 //2024-03-22 ballID handling
@@ -387,15 +385,16 @@ void nsESPaccessory::ESPaccessorySetup() {
 
 
 void nsESPaccessory::ESPaccessoryLoop() {
-
+	static unsigned long previousMillis;
+	static unsigned long interval;
 	unsigned long currentMillis = millis();
 
-	//TCP connection state engine
+	//TCP connection state engine and heatbeat indicator state engine
 	switch (deviceState) {
 	case S_FAULT:
 		break;
 	case S_TCP_CONNECTED_AS_CLIENT:
-		//flash led 0.2 sec on, 5 off
+		//LED: flash led 0.2 sec on, 5 off
 		if (currentMillis - previousMillis >= interval) {
 			//digitalWrite(16, ledState);  //led is active low, false=on    DEBUG disable
 			interval = heartbeatLEDstate ? 5000 : 200;
@@ -411,9 +410,8 @@ void nsESPaccessory::ESPaccessoryLoop() {
 
 	case S_TCP_PENDING_CONNECT_AS_CLIENT:
 		//we kicked off ONE new attempt at a connect
-		//flash led 1 sec on/off
+		//LED: 1 sec on/off
 		if (currentMillis - previousMillis >= 1000) {
-			//digitalWrite(16, ledState);
 			heartbeatLEDstate = !heartbeatLEDstate;
 			previousMillis = currentMillis;
 
@@ -422,6 +420,37 @@ void nsESPaccessory::ESPaccessoryLoop() {
 			//There is a risk that old instances of the client remain in memory and after about 30 instances are created the ESP will run out of resources and crassh, i.e. 
 			//its a memory leak.
 
+		}
+		break;
+
+	case S_BOOT_WIFI_AP_LOCONET_HOST:
+	case S_BOOT_WIFI_STA_LOCONET_HOST:
+	case S_BOOT_WIFI_STA_LOCONET_CLIENT:
+		//refactor. if we have a client we must be connected to wifi also
+		if (clientX) {
+			//LED: yes, we have a client. flash 0.2 then 5 sec
+			if (currentMillis - previousMillis >= interval) {
+				interval = heartbeatLEDstate ? 5000 : 200;  //active low
+				heartbeatLEDstate = !heartbeatLEDstate;
+				previousMillis = currentMillis;
+			}
+		}
+		else {
+			//no client but is Wifi active?
+			if ((deviceState == S_BOOT_WIFI_AP_LOCONET_HOST) || (WiFi.isConnected())) {
+				//LED: slow flash 1s
+					if (currentMillis - previousMillis >= 1000) {
+					heartbeatLEDstate = !heartbeatLEDstate;
+					previousMillis = currentMillis;
+				}
+			}
+			else {
+				//LED: urgent flash 0.2 duty
+				if (currentMillis - previousMillis >= 200) {
+					heartbeatLEDstate = !heartbeatLEDstate;
+					previousMillis = currentMillis;
+				}
+			}
 		}
 		break;
 
@@ -745,7 +774,7 @@ void checkSerial(void) {
 				Serial.println(WiFi.softAPIP().toString());
 				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
 				break;
-			case 'C':
+			case  'C':
 				Serial.printf("Network SSID %s\n", bootController.STA_SSID);
 				Serial.println(F("Running as LocoNet CLIENT"));
 				Serial.printf("Loconet server IP %s\n", bootController.tcpIP);
