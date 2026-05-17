@@ -2,6 +2,17 @@
 // 
 // 
 
+/*2026-05-17 bug. when updating the software version we are not writing bank1 and bank2 to eeprom, and/or when reading them
+we get junk data in them.  e.g. device type is 234, power is 255 instead of 1=true.  The eeprom is 2202 which is big enough as
+system says it needs 2160.  FIXED, i forgot to write those banks to eeprom duh.
+
+processor load: the fp math is slow. when a servo is moving we keep recalculating its posn, when we could instead calculate a step size once based on 
+the angle to move and the rate.  also once a servo is closed|thrown its position value does not change, so even if continous is enabled we should
+not recalculate the same end position over and over.
+
+even if we fix all this, with 32 servos we might have a math overload if we try to move all of them at once.
+*/
+
 
 /*Commands, uppercase set the wifi and TCP server params
 
@@ -43,8 +54,7 @@ VERBOSE command is: v, this will dump loconet messages to serial. reverts to ver
 
 
 /*
-2026-04-28 to do... create a 2Hz timer for MAS state and sort out MAScommandSync.  does not make sense to dedicate a timer to it
-when we can derive it off a 15mS interval count for processServo()
+2026-05-04 adding I2C.  will use pin0 for SCL and pin1 for SDA.
 
 
 
@@ -80,6 +90,8 @@ on the PCA9685 device it will be pins 0-15
 #include "ESPservo.h"
 #include <stdint.h>
 #include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+//https://github.com/adafruit/Adafruit-PWM-Servo-Driver-Library/blob/master/examples/servo/servo.ino
 
 const uint8_t NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
 //5,4 are commonly used for SCL,SDA on I2C
@@ -101,7 +113,7 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260413;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260511;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.2\0";   //note the actual setting requires comma separators
@@ -111,6 +123,8 @@ struct CONTROLLER
 	uint16_t tcpPort = 1234;       //tcp port
 	char Mode = 'S';  //C denotes client, S server and L as standalone wifi server
 	bool hasPCA9685modules = false; //denotes PCA modules are present
+	uint16_t PCAservoMin = 150;
+	uint16_t PCAservoMax = 600;
 	bool isDirty = false;  //will be true if EEPROM needs to be written
 };
 
@@ -153,15 +167,15 @@ static os_timer_t servoTimer;
 static uint8_t deviceState = S_BOOT_WIFI_AP_LOCONET_HOST;
 
 
-//2024-03-22 ballID handling
+
 //void payloadTimerCallback(void* pArg);
 static os_timer_t payloadTimer;
 
 
 
 //++++++++++++++++++++ TURNOUTS, SIGNALS AND SENSORS ++++++++++++++++++++++++++++++++++++++++++++++
-#define TOTAL_PINS 9
-#define BASE_PIN 0
+#define ESP_TOTAL_PINS 9
+#define ESP_BASE_PIN 0
 #define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
 #define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
 
@@ -171,8 +185,8 @@ enum DEVICE_TYPES : uint8_t{
 	DEVICE_ASPECT,
 	DEVICE_MAS,
 	DEVICE_SENSOR,
-	DEVICE_SENSOR_WPU
-	//DEVICE_SERVO_PCA
+	DEVICE_SENSOR_WPU,
+	DEVICE_I2C
 };
 
 
@@ -216,7 +230,13 @@ struct VIRTUALSERVO {
 };
 
 //virtual servo objects, there are 9 in Bank 0 (the ESP12) and then 16 in each of Bank 1 and 2 which are PCA drivers
-VIRTUALSERVO virtualservoCollection[TOTAL_PINS];
+VIRTUALSERVO virtualservoCollection[ESP_TOTAL_PINS];
+VIRTUALSERVO virtualservoCollectionBank1[16];
+VIRTUALSERVO virtualservoCollectionBank2[16];
+
+Adafruit_PWMServoDriver PCAbank1 = Adafruit_PWMServoDriver(0x40);
+Adafruit_PWMServoDriver PCAbank2 = Adafruit_PWMServoDriver(0x41);
+
 
 
 //function declaraions
@@ -255,6 +275,9 @@ void eeGetSettings(void);
 void eePutSettings(void);
 void checkSerial(void);
 static void sendEnqueuedMessages();
+//void PCAservoAttach(VIRTUALSERVO vs, uint8_t bank, bool attach);
+//void PCAservoWrite(VIRTUALSERVO vs, uint8_t bank);
+void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach);
 
 //cannot put this in the header and then expect to use it in another namespace as it will cause a compiler error
 //instead we have to return its value via a function
@@ -373,12 +396,13 @@ void nsESPaccessory::ESPaccessorySetup() {
 		break;
 		
 	}
-
 	
 
 	//https://sub.nanona.fi/esp8266/hello-world.html
 	os_timer_setfn(&servoTimer, (os_timer_func_t*)processServo, NULL);
 	os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
+	
+
 
 }
 
@@ -734,8 +758,6 @@ void checkSerial(void) {
 			break;
 		}
 	
-	
-	
 	}
 
 
@@ -780,6 +802,9 @@ void checkSerial(void) {
 				Serial.printf("Loconet server IP %s\n", bootController.tcpIP);
 				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
 			}
+
+			Serial.printf("PCA min %d\n\n", bootController.PCAservoMin);
+			Serial.printf("PCA max %d\n\n", bootController.PCAservoMax);
 		}
 
 		if (SerialBuffer[0] == 'S') {
@@ -1345,6 +1370,21 @@ void checkSerial(void) {
 			}
 		}
 
+		if (SerialBuffer[0] == 'j') {
+		//DEBUG
+			Serial.printf("power %d\n", virtualservoCollectionBank1[0].power);
+			Serial.printf("cont %d\n", virtualservoCollectionBank1[0].continuous);
+			Serial.printf("posn %d\n", virtualservoCollectionBank1[0].position);
+			Serial.printf("state %d\n", virtualservoCollectionBank1[0].state);
+			Serial.printf("device %d\n\n", virtualservoCollectionBank1[0].deviceType);
+			Serial.printf("power %d\n", virtualservoCollectionBank1[1].power);
+			Serial.printf("cont %d\n", virtualservoCollectionBank1[1].continuous);
+			Serial.printf("posn %d\n", virtualservoCollectionBank1[1].position);
+			Serial.printf("state %d\n", virtualservoCollectionBank1[1].state);
+			Serial.printf("device %d\n", virtualservoCollectionBank1[1].deviceType);
+		}
+
+
 		//DUMP all servo/aspect information
 		if (SerialBuffer[0] == 'x') {
 
@@ -1393,7 +1433,9 @@ void checkSerial(void) {
 					if (vs.ignorePowerParameter) { Serial.print("x"); }
 					else { Serial.print(vs.power, DEC); }
 					break;
-
+				case DEVICE_I2C:
+					Serial.print(F("I2C pin "));
+					break;
 				case DEVICE_MAS:
 					Serial.print(F("MAS pin "));
 					Serial.print(vs.pin, DEC);
@@ -1605,7 +1647,7 @@ void checkSerial(void) {
 	/// <param name="p">pin number</param>
 	/// <returns>true if valid</returns>
 bool validatePin(int p) {
-	if ((p < BASE_PIN) || (p >= BASE_PIN + TOTAL_PINS)) {
+	if ((p < ESP_BASE_PIN) || (p >= ESP_BASE_PIN + ESP_TOTAL_PINS)) {
 		Serial.printf("bad pin %d\n",p);
 		return false;
 	}
@@ -1913,13 +1955,181 @@ bool nsESPaccessory::pollSensor(int16_t addr) {
 
 const int EEOFFSET = 192;
 
+
+/// <summary>
+/// If booting a new system, set virtual servos to their default settings
+/// </summary>
+/// <param name="vsc">virtual servo collection</param>
+/// <param name="pinCount">total pins</param>
+/// <param name="isPCAbank">true if a PCA bank</param>
+void setVirtualServoDefaults(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
+	//cpp arrays decay to a pointer to the first element and size is lost
+	//cannot use auto, we just have to iterate array
+	static uint8_t totalPins;
+
+	for (uint8_t p = 0;p < pinCount;p++) {
+		totalPins++;
+		auto& vs = vsc[p];
+		//initialise the pin assignments move all servos and aspects to closed position
+		vs.pin = p;
+		vs.invert = 0;
+		vs.position = 90;
+		vs.swing = 25;
+		vs.continuous = 0;
+		vs.state = SERVO_BOOT;
+		vs.power = false;
+		vs.ignorePowerParameter = true;
+		vs.deviceType = DEVICE_SERVO;
+		vs.rate = 0;
+		memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+	}
+
+	//debug
+	Serial.printf("total pins %d\n", totalPins);
+}
+
+
+/*
+void setVirtualServoDefaults(VIRTUALSERVO(*ptrToVSC)[16], uint8_t pinCount, bool isPCAbank) {
+	uint8_t p = 0;
+	for (auto& vs : *ptrToVSC) {
+		vs.pin = p++;
+		vs.invert = 0;
+		vs.position = 90;
+		vs.swing = 25;
+		vs.continuous = 0;
+		vs.state = SERVO_BOOT;
+		vs.power = true;
+		vs.ignorePowerParameter = true;
+		vs.deviceType = DEVICE_SERVO;
+		vs.rate = 0;
+		memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+	}
+}
+*/
+
+
+
+
+
+
+
+
+
+/// <summary>
+/// boot a virtual servo on power up from its programmed settings
+/// </summary>
+/// <param name="vsc">virtual servo collection</param>
+/// <param name="pinCount">total pins</param>
+/// <param name="isPCAbank">true if a PCA bank</param>
+void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
+	for (uint8_t p = 0;p < pinCount;p++) {
+		auto& vs=vsc[p];  //we need to modify vsc, not modify a copy of the element!
+		vs.pin = p;
+		vs.state = SERVO_BOOT;
+		vs.MASstate = 127;
+		//vs.position = 90;  //neutral
+		/*minimum useful swing is 5 degrees*/
+		if ((vs.swing < 5) || (vs.swing > 90)) vs.swing = 5;
+
+		//calculate closed posn (we may be inverted) then back off 5 degrees and set that as posn
+		if (vs.invert) {
+			//max position
+			vs.position = 90 + vs.swing - 5;
+		}
+		else {
+			//min position, normal for closed
+			vs.position = 90 - vs.swing + 5;
+		}
+
+		//2026-02-13 for some reason, address data is corrupt when reading back pin 3 parameters.
+		//try masking out irrelevant bits.  FFF allows 2048d, whereas 7FF allows upto 2047d
+		//vs.address &= 0xFFF;
+			
+
+		if (!bootController.hasPCA9685modules) continue;
+		if (isPCAbank) continue; 
+		if (p > 0) continue;
+		//initialise Wire on bank0, pins 0 (SCL) and 1 (SDA)
+		//nah, use D4 and D5.   D0 is an RTC pin and prob does not work with Wire.
+		Wire.begin(NodeMCUmap[4], NodeMCUmap[5]);  //sda,scl
+		vsc[4].deviceType = DEVICE_I2C;
+		vsc[5].deviceType = DEVICE_I2C;
+
+		/*I2C device scan*/
+		byte error, address;
+		int nDevices;
+
+		Serial.println(F("I2C scanning..."));
+		nDevices = 0;
+		for (address = 1; address < 127; ++address)
+		{
+			// The i2c_scanner uses the return value of
+			// the Write.endTransmisstion to see if
+			// a device did acknowledge to the address.
+			Wire.beginTransmission(address);
+			error = Wire.endTransmission();
+
+			if (error == 0)
+			{
+				Serial.print("I2C device found at address 0x");
+				if (address < 16)
+					Serial.print("0");
+				Serial.print(address, HEX);
+				Serial.println(" !");
+				++nDevices;
+			}
+			else if (error == 4)
+			{
+				Serial.print(F("Unknown error at address 0x"));
+				if (address < 16)
+					Serial.print("0");
+				Serial.println(address, HEX);
+			}
+		}
+
+		if (nDevices == 0) {
+			Serial.println(F("No I2C devices found\n"));
+		}
+		else {
+			if (bootController.hasPCA9685modules) {
+				//IMPORTANT: Wire must be started before calling pwm.begin
+				PCAbank1.begin();
+				PCAbank1.setPWMFreq(50);
+				delay(10);
+				PCAbank2.begin();
+				PCAbank2.setPWMFreq(50);
+				Serial.println(F("boot PCA modules"));
+				
+				//debug, this works
+				//PCAbank1.setPin(0, 4000, false);
+				//PCAbank1.setPin(15, 1024, true);
+
+
+			}
+
+
+		}
+		//there's no means to check a device is a PCA device as these do not have ID codes
+
+
+
+
+
+	}
+}
+
+
+
+
 /// <summary>
 /// restores settings from EEPROM. If the software version has changed, we overwrite the eeprom with defaults
 /// we also need to clear certain values on boot. max EEPROM we can use is 4096
 /// </summary>
 void eeGetSettings(void) {
 	CONTROLLER defaultController;  //grab defaults
-	EEPROM.begin(1024);  //ESP does not have dedicated eeprom and must be allocated from Flash
+	//EEPROM.begin(1024);  //ESP does not have dedicated eeprom and must be allocated from Flash
+	EEPROM.begin(2200);  //ESP does not have dedicated eeprom and must be allocated from Flash.  Need 2200 for 3 banks
 	int eeAddr = 0;
 	bool factory = false;
 	EEPROM.get(eeAddr, bootController);
@@ -1932,24 +2142,22 @@ void eeGetSettings(void) {
 		//eeAddr += sizeof(defaultController);
 		eeAddr = EEOFFSET; //bug fix
 
-		//set defaults
-		int p = BASE_PIN;
-		for (auto& vs : virtualservoCollection) {
-			vs.pin = p;
-			vs.invert = 0;
-			vs.position = 90;
-			vs.swing = 25;
-			vs.continuous = 0;
-			vs.state = SERVO_BOOT;
-			vs.power = false;
-			vs.ignorePowerParameter = true;
-			vs.deviceType = DEVICE_SERVO;
-			vs.rate = 0;
-			memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-			++p;
-		}
+		//set defaults for all virtual servo groups
+
+		setVirtualServoDefaults(virtualservoCollection, ESP_TOTAL_PINS, false);
+		setVirtualServoDefaults(virtualservoCollectionBank1, 16, true);
+		setVirtualServoDefaults(virtualservoCollectionBank2, 16, true);
+
+		
 		/*write back default values*/
 		EEPROM.put(eeAddr, virtualservoCollection);
+		eeAddr += sizeof(virtualservoCollection);
+		//and banks 1 & 2
+		EEPROM.put(eeAddr, virtualservoCollectionBank1);
+		eeAddr += sizeof(virtualservoCollectionBank1);
+		EEPROM.put(eeAddr, virtualservoCollectionBank2);
+		eeAddr += sizeof(virtualservoCollectionBank2);
+
 	}
 		/*either way, now populate our structs with EEprom values*/
 		eeAddr = 0;
@@ -1958,44 +2166,34 @@ void eeGetSettings(void) {
 		eeAddr = EEOFFSET; //bug fix
 		EEPROM.get(eeAddr, virtualservoCollection);
 		eeAddr += sizeof(virtualservoCollection);
+		//and banks 1 & 2
+		EEPROM.get(eeAddr, virtualservoCollectionBank1);
+		eeAddr += sizeof(virtualservoCollectionBank1);
+		EEPROM.get(eeAddr, virtualservoCollectionBank2);
+		eeAddr += sizeof(virtualservoCollectionBank2);
+		
 		Serial.print(F("EEPROM="));
 		Serial.println(eeAddr, DEC);
 		bankSelect = 0;  //select bank 0 on startup
 
 		//initialise the pin assignments move all servos and aspects to closed position
-		int i = 0;
-		int p = BASE_PIN;
-		
-		for (auto& vs : virtualservoCollection) {
-			vs.pin = p;
-			vs.state = SERVO_BOOT;
-			vs.MASstate = 127;
-			//vs.position = 90;  //neutral
-			/*minimum useful swing is 5 degrees*/
-			if ((vs.swing < 5) || (vs.swing > 90)) vs.swing = 5;
+				
+		bootVirtualServo(virtualservoCollection, ESP_TOTAL_PINS,false);
+		bootVirtualServo(virtualservoCollectionBank1, 16, true);
+		bootVirtualServo(virtualservoCollectionBank2, 16, true);
+			
 
-			//calculate closed posn (we may be inverted) then back off 5 degrees and set that as posn
-			if (vs.invert) {
-				//max position
-				vs.position = 90 + vs.swing - 5;
-			}
-			else {
-				//min position, normal for closed
-				vs.position = 90 - vs.swing + 5;
-			}
+		//2026-04-05 for some reason bootVS means we no longer see the boot 0,1,2,3 etc messages
+		//how nothing to do with PCA because I am not calling setVSD
 
-			//2026-02-13 for some reason, address data is corrupt when reading back pin 3 parameters.
-			//try masking out irrelevant bits.  FFF allows 2048d, whereas 7FF allows upto 2047d
-			vs.address &= 0xFFF;
-					
-			++p;
-			++i;
-		}
 		Serial.print(F("\nsofware version "));
 		Serial.println(bootController.softwareVersion, DEC);
 		if (factory) Serial.println(F("factory reset"));
 
 }
+
+
+
 
 /// <summary>
 /// save settings to EEPROM, we save the bootController struct
@@ -2009,6 +2207,13 @@ void eePutSettings(void) {
 
 	EEPROM.put(eeAddr, virtualservoCollection);
 	eeAddr += sizeof(virtualservoCollection);
+//and banks 1 and 2
+	EEPROM.put(eeAddr, virtualservoCollectionBank1);
+	eeAddr += sizeof(virtualservoCollectionBank1);
+	EEPROM.put(eeAddr, virtualservoCollectionBank2);
+	eeAddr += sizeof(virtualservoCollectionBank2);
+
+
 	EEPROM.commit();
 	trace(Serial.printf("EEPROM commit, bytes %d\r\n", eeAddr);)
 	bootController.isDirty = false;
@@ -2248,6 +2453,11 @@ void processServo(void) {
 					bootTimer = 0;
 					ESPservoAttach(vs.pin, false);
 					break;
+				case DEVICE_I2C:
+					vsBoot = nullptr;
+					bootTimer = 0;
+					break;
+
 				}
 
 
@@ -2271,15 +2481,201 @@ void processServo(void) {
 		//update servo positions every 15ms
 		if (vs.deviceType==DEVICE_SERVO) ESPservoWrite(vs.pin, vs.position);
 
-	}
+		//2026-05-11 need to modify this to handle PCA servos or aspects or MAS
+
+	} //end of auto virtualServoCollection, aka BANK 0
+
+	
+	if (!bootController.hasPCA9685modules) return;
+
+	for (uint8_t activeBank = 1;activeBank < 3;activeBank++) {
+
+		//debug, we might run out of time.  We are seeing Soft WDT resets after bank2 boots
+		//yup, exiting before we process bank2 prevents the WDT.  yield() just causes and immedate crash
+		//i think i either need to speed up this loop (it does call float math a lot) or slow down calls to the loop
+		//and loose resolution on servo movements.
+
+		if (activeBank == 2) break;  //temp fix for WDT resets
+	
+	VIRTUALSERVO(*ptrToVSC)[16] = &virtualservoCollectionBank1;  //this points to entire array and does not decay to first element
+	if (activeBank == 2) ptrToVSC = &virtualservoCollectionBank2;
+
+		for (auto& vs : *ptrToVSC) {
+			if (vs.pin > 15) continue;  //invalid pin
+			uint8_t maxPosition = vs.swing + 90;
+			uint8_t minPosition = 90 - vs.swing;
+			//Servo rotation rates. +ve rate values will speed up movement by increasing the movement increment above 1
+			uint8_t increment = vs.rate > 0 ? vs.rate : 1;
+			//.timeDelay is used for -ve rate values
+			vs.timeDelay += vs.timeDelay < 0 ? 1 : 0;
+
+			switch (vs.state) {
+			case SERVO_BOOT:
+				if (vsBoot == nullptr) {
+					//handle next-up servo to boot. servos are booted in the CLOSED position
+					//and aspects are booted with POWER=off
+					vsBoot = (VIRTUALSERVO*)&vs;
+					bootTimer = 34;
+
+					//refactor as switch.  vs and vsBoot are the same item
+					switch (vs.deviceType) {
+					case DEVICE_SERVO:
+						vs.position = vs.invert ? maxPosition : minPosition;  //means we boot at 0 or 180 even though we might normally operate at say 90+-10....
+						//attaches the driver and commands to a specific position immediately
+						PCAservoWrite(&vs, activeBank,true);
+						break;
+
+					case DEVICE_ASPECT:
+						vs.power = false;
+						vs.state = vs.deviceType == DEVICE_MAS ? ASPECT_MULTIPLE : ASPECT_CLOSED;
+						vsBoot = nullptr;
+						bootTimer = 0;
+						//ESPservoAttach(vs.pin, false);  //no need to attach
+						break;
+					}
+				}
+				else if (vsBoot == (VIRTUALSERVO*)&vs) {
+					//This is the current boot-servo. Decrement bootTimer
+					bootTimer -= bootTimer > 0 ? 1 : 0;
+
+					//timed out?
+					if (bootTimer == 0) {
+						vs.state = SERVO_CLOSED;
+						Serial.print(F("pin booted "));
+						Serial.println(vs.pin, DEC);
+						//release for next vs to boot
+						vsBoot = nullptr;
+					}
+				}
+
+				break;
+
+			case SERVO_NEUTRAL:
+				vs.position = 90;
+				PCAservoWrite(&vs, activeBank,true);
+				break;
+
+			case SERVO_TO_CLOSED:
+				//-ve rotation rate values will slow down movement
+				if (vs.timeDelay != 0) break;
+				vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
+
+				//swing toward minPosition, unless invert is true
+				if (vs.invert) {
+					vs.position += vs.position < maxPosition ? increment : 0;
+				}
+				else {
+					vs.position -= vs.position > minPosition ? increment : 0;
+				}
+
+				if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+					vs.state = SERVO_CLOSED;
+				}
+
+				PCAservoWrite(&vs, activeBank, true);
+				break;
+
+			case SERVO_TO_THROWN:
+				//-ve roation rate values will slow down movement
+				if (vs.timeDelay != 0) break;
+				vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
+
+				//swing toward maxPosition unless invert is true
+				if (vs.invert) {
+					vs.position -= vs.position > minPosition ? increment : 0;
+				}
+				else {
+					vs.position += vs.position < maxPosition ? increment : 0;
+				}
+
+				if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+					vs.state = SERVO_THROWN;
+				}
+
+				PCAservoWrite(&vs, activeBank, true);
+				break;
+
+			case SERVO_THROWN:
+				vs.position = vs.invert ? minPosition : maxPosition;
+				PCAservoWrite(&vs, activeBank, vs.continuous);
+				break;
+
+			case SERVO_CLOSED:
+				vs.position = vs.invert ? maxPosition : minPosition;
+				PCAservoWrite(&vs, activeBank, vs.continuous);
+
+				break;
+
+
+			}//end switch
+
+
+			//update servo positions every 15ms
+			//if (vs.deviceType == DEVICE_SERVO) PCAservoWrite(vs, activeBank);
+
+		}
+
+	}//for loop
+
+
 
 }
 
 
 
-//2026-04-14 give up on servo support.   The nodeMCU has 3v3 outputs, and so the breakoutboard servo pin connectors are all 3v3
-//there's not enough power available from the 3v3 regulator.
-//and it seems the Servo library will cause soft WDT timeouts if you write(vs.position) for all the servos every 15mS.
-//I think signals with tristate is still viable and infact on 3v3 is a good thing.  But servos are off the agenda as the SZDOIT board does not 
-//put 5v on the JST connector common rail.   I could write my own low-level int PWM code, but this does not fix the SZDOIT board problem
+
+
+
+
+
+
+
+
+
+/*PCA notes
+PCAbank1.setPWM(vs.pin, whenOn, whenOff);  whenOn is usually 0, whenOff is when 0-4096 that output goes low
+if both are zero then presumably there is no high pulse
+
+PCAbank1.setPin(pin, pulse value, invert);  pulse value is 0-4096 where 0 is completely OFF unless invert is true
+PCAbank1.setOutputMode(totem);  true for totem outputs, false for open drain. this is global and all outputs will be of same type.
+
+*/
+
+
+
+/// <summary>
+/// accepts a virtual servo member, processes it and modifies it
+/// </summary>
+/// <param name="vs">target vs</param>
+/// <param name="bank">bank 1 or 2</param>
+/// <param name="attach">true if pwm active</param>
+void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach) {
+	if (vs->pin > 15) return;
+	if (attach) {
+		float d = vs->position / 180.0;
+		d *= (bootController.PCAservoMax - bootController.PCAservoMin);  //full range
+		d += bootController.PCAservoMin;  //add min pulse offset
+		if (bank == 1) {
+			PCAbank1.setPWM(vs->pin, 0, (uint16_t)d);
+		}
+		else {
+			PCAbank2.setPWM(vs->pin, 0, (uint16_t)d);
+		}
+		vs->power = true;
+		return;
+	}
+	//detach, pull output low
+		if (!vs->power) return;
+		if (bank == 1) {
+			PCAbank1.setPin(vs->pin, 0, false);
+		}
+		else {
+			PCAbank2.setPin(vs->pin, 0, false);
+		}
+		vs->power = false;
+}
+
+
+//delay test for PCA processing.  if we have a bit that we take high when we enter the 15mS block and low when we exit, we should see how long the processing takes
+//
 
