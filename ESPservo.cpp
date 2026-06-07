@@ -1,8 +1,10 @@
 
 /*
+Low level direct pin mainpulation routines.  These generate PWM signals on the ESP8266 device.
+
 IMPORTANT: GPIO16 is part of the RTC module, and cannot be controlled via out_w1ts/out_w1tc
 
-NodeMCU hardware SZDOIT motor board
+NodeMCU hardware SZDOIT motor board.  D4 and 5 are used for I2C communication.
 https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
 D0 GPIO16
 D1 GPIO5 PWMA
@@ -28,8 +30,6 @@ reg_val |= (1 << 0);
 uint32_t reg_val = *((volatile uint32_t *)0x60000700);
 reg_val &= ~(1 << 0);
 *((volatile uint32_t *)0x60000700) = reg_val;
-
-
 
 */
 
@@ -115,7 +115,7 @@ const int NEUTRAL_PULSE = 428;
 //cascade through each servo and assert each servo pulse in turn, with all of them repeating on a 20mS (6250 ticks) cycle
 //index 0 is not used as GPIO16 cannot be driven with out_w1ts/c
 static void IRAM_ATTR servo_handler(void) {
-	static uint8_t servoIndex = 1;
+	static uint8_t servoIndex = 1;  //start at 1 because pin 0 is GPIO16 and cannot be controlled via out_w1ts
 	static uint16_t periodPadding = PAD_PULSE;
 	static uint32_t servoGPIOmask = 0;
 
@@ -126,7 +126,7 @@ static void IRAM_ATTR servo_handler(void) {
 	//if a servo is not attached, then we clear servoGPIOmask and we still need to load the pulse period
 	//to ensure we have another int and advance through all pins
 
-	if (servoIndex < 9) {
+	if (servoIndex < 8) {  //DEBUG return this to 9 when done debugging
 		if (servoPool[servoIndex].isAttached) {
 			servoGPIOmask = 1 << servoPool[servoIndex].gpioPin;
 			gpio->out_w1ts = servoGPIOmask;

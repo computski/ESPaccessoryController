@@ -2,15 +2,35 @@
 // 
 // 
 
-/*2026-05-17 bug. when updating the software version we are not writing bank1 and bank2 to eeprom, and/or when reading them
-we get junk data in them.  e.g. device type is 234, power is 255 instead of 1=true.  The eeprom is 2202 which is big enough as
-system says it needs 2160.  FIXED, i forgot to write those banks to eeprom duh.
+/*
+This module handles all communication whether its Serial commands or LocoNet messages.  It also programs up the three available banks of servos
+bank 0 is the ESP8266 device
+bank 1 is an optional PCA 9685 bank on I2C address 0x40
+bank 2 is an optional PCA 9685 bank on I2C address 0x41
 
-processor load: the fp math is slow. when a servo is moving we keep recalculating its posn, when we could instead calculate a step size once based on 
-the angle to move and the rate.  also once a servo is closed|thrown its position value does not change, so even if continous is enabled we should
-not recalculate the same end position over and over.
+Note: D0 on the ESP cannot be used as a servo control.  It can only support signal aspects and acting as a sensor.
 
-even if we fix all this, with 32 servos we might have a math overload if we try to move all of them at once.
+for ESPservo.cpp
+1/ calc position/180 giving a percentile of the range.  note that swing is either side of 90
+2/ calc max-min pulse lengths, i.e. delta range and multiply by the percentile
+3/ and min-length as an offset, and we are done.
+the main loop deals in degrees either side of 90.  And the rate determins how quikly we move by one degree.
+eg. a 5 degree swing are 5 steps, each will take 
+
+rate is zero by default, so all delay is dealt with via vs.timeDelay.  this ticks up toward zero at 15mS intervals
+it is reloaded with what value?  if vs.rate is neg, then this is loaded into vs.timeDelay (i.e. counts of 15mS)
+if rate is +ve, then vs.TimeDelay is loaded with zero, because we will instead be increasing the movement value
+Qn, what is the default rate value on boot?  It is zero
+If we have a 25 degree swing (either side of 90), we step in 1 degree increments.  i.e. 50 steps of 15mS each, is 750mS or 3/4 of a second.
+
+
+2026-05-30 want to re-use code blocks, but you'd need overloads for bank0[9] and bank1/2[16]
+VIRTUALSERVO(*ptrToVSC)[16] = &virtualservoCollectionBank1;  //this won't decay to the first element
+
+
+
+Known issue, if a PCA device is not present, the adafruit library will cause a hang and WDT crash.
+https://www.google.com/search?q=Adafruit+PWM+Servo+Driver+Library+causes+esp8266+crash+if+no+device+present&rlz=1C1CHBF_enAU1138AU1138&oq=Adafruit+PWM+Servo+Driver+Library+causes+esp8266+crash+if+no+device+present&gs_lcrp=EgZjaHJvbWUyBggAEEUYOTIGCAEQIRgKMgcIAhAhGI8CMgcIAxAhGI8CMgcIBBAhGI8C0gEJMTE3NzBqMGo3qAIAsAIA&sourceid=chrome&ie=UTF-8
 */
 
 
@@ -54,16 +74,6 @@ VERBOSE command is: v, this will dump loconet messages to serial. reverts to ver
 
 
 /*
-2026-05-04 adding I2C.  will use pin0 for SCL and pin1 for SDA.
-
-
-
-
-
-
-good idea to use BANKS, with bank 0 is the NodeMCU, bank1 is the first PCA and bank2 the second PCA
-each PCA can then have 16 pins
-
 NodeMCU hardware SZDOIT board
 https://randomnerdtutorials.com/esp8266-pinout-reference-gpios/
 D0 GPIO16 (also on-board LED active low)
@@ -77,12 +87,10 @@ D7 GPIO13
 D8 GPIO15 (WPD, boot fails if hi)
 
 Assuming you use active pull down sensors, then all pins bar D8 can host a sensor
-The A0 analog input could also house a sensor.
+The A0 analog input could also host a sensor.
 
 So BANK0 CAN HAVE 9 io pins, we will map them as 0 through 8 to mirror the nodemcu naming
 on the PCA9685 device it will be pins 0-15
-
-
 
 */
 
@@ -105,6 +113,10 @@ void processServo(void);
 #else
 #define trace(traceCodeBlock) traceCodeBlock
 #endif
+
+//Debug testing. Used to measure the execution time within processServo(). This is called every 15mS and must
+//comfortably complete execution within this period before the next call. sync pulse is on D8
+#define SYNC_PULSE
 
 
 using namespace nsESPaccessory;
@@ -229,6 +241,7 @@ struct VIRTUALSERVO {
 	uint8_t MASstate;  //Multiple Aspect Signal commanded state
 };
 
+
 //virtual servo objects, there are 9 in Bank 0 (the ESP12) and then 16 in each of Bank 1 and 2 which are PCA drivers
 VIRTUALSERVO virtualservoCollection[ESP_TOTAL_PINS];
 VIRTUALSERVO virtualservoCollectionBank1[16];
@@ -238,21 +251,13 @@ Adafruit_PWMServoDriver PCAbank1 = Adafruit_PWMServoDriver(0x40);
 Adafruit_PWMServoDriver PCAbank2 = Adafruit_PWMServoDriver(0x41);
 
 
-
 //function declaraions
 uint8_t parseBracketedParameters(char* token, uint8_t* result);
 bool validatePin(int p);
 bool validateAddress(int address);
-uint8_t assertMASoutput(VIRTUALSERVO vs);
+uint8_t assertMASoutput(VIRTUALSERVO vs,uint8_t bank);
 
 
-
-
-
-
-
-//and if you put it here and use a declaration above you get a odd linker reference error... hmmm
-//https://stackoverflow.com/questions/625799/resolve-build-errors-due-to-circular-dependency-amongst-classes
 void payloadTimerCallback(void* pArg)
 {
 	Serial.println("payloadTimer Event");
@@ -278,20 +283,13 @@ static void sendEnqueuedMessages();
 //void PCAservoAttach(VIRTUALSERVO vs, uint8_t bank, bool attach);
 //void PCAservoWrite(VIRTUALSERVO vs, uint8_t bank);
 void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach);
+static void prompt(bool ok=false);
 
 //cannot put this in the header and then expect to use it in another namespace as it will cause a compiler error
 //instead we have to return its value via a function
 bool verbose;
 
 
-
-
-//ESP-12 pinout
-//SCK 14 
-//MOSI 13
-//MISO 12
-//CSN 15
-//CE 2
 
 
 #define TRACE
@@ -320,11 +318,15 @@ void nsESPaccessory::ESPaccessorySetup() {
 	verbose = false;
 	eeGetSettings();
 	
-	//DEBUG
-	verbose = true;
-
+	
+//used for debug.  Will output a hi pulse on GPIO16 at the start of the 15mS PWM pulse interval and goes low again when all processing
+//is finished.  This allows you to confirm that all floating point math and code runs comfortably inside this 15mS timer window
+//rename to SYNC_PULSE to enable, nSYNC_PULSE to disable
+#ifdef nSYNC_PULSE
+	pinMode(NodeMCUmap[8], OUTPUT); 
+#endif
+	
 	Serial.println(F("For help use ?"));
-
 
 	//choose boot mode
 	switch (bootController.Mode) {
@@ -668,13 +670,15 @@ void checkSerial(void) {
 	Serial.readString().toCharArray(SerialBuffer, 64);
 
 	//Note: its a quirk of readString but ParseBracketedParameters won't work with the SerialBuffer reliably
-	//need to fix this in ParseBracketedParameters itself
+	//need to fix this in ParseBracketedParameters itself. DONE.
 
 
-	//need a temporary virtualservo object
+	//need a temporary virtualservo object to iterate the object
 	VIRTUALSERVO vsParse;
-	//also need a pointer to a servo in virtualservoCollection
+	//also need a pointer to a servo in virtualservoCollection to modify a specific vs element
 	VIRTUALSERVO* vsPointer = nullptr;
+	uint8_t i = 0;
+	char* pch;
 
 
 	//+++ TCP-IP and WIFI COMMANDS +++
@@ -688,7 +692,6 @@ void checkSerial(void) {
 			/* get the first token */
 			token = strtok(SerialBuffer + 1, s);
 
-			uint8_t i = 0;
 
 			/* walk through other tokens */
 			while (token != NULL) {
@@ -728,7 +731,9 @@ void checkSerial(void) {
 		//B? gives current bank.
 
 		switch (SerialBuffer[1]){
-		
+		case '\0': //respond to B? or B on its own
+		case '\r':
+		case '\n':
 		case '?':
 			if (bootController.hasPCA9685modules) {
 				Serial.printf("Bank %d active\n", bankSelect);
@@ -736,28 +741,28 @@ void checkSerial(void) {
 			else {
 				Serial.println(F("I2C not active, no PCA modules"));
 			}
+			prompt();
 			break;
 		case 'E':
 			Serial.println(F("I2C activated. Now reboot."));
 			bootController.hasPCA9685modules = true;
 			bootController.isDirty = true;
-			eePutSettings();
 			break;
 		case 'X':
 			Serial.println(F("I2C deactivated. Now reboot."));
 			bootController.hasPCA9685modules = false;
 			bootController.isDirty = true;
-			eePutSettings();
 			break;
 		case '0':
 		case '1':
 		case '2':
 			//subtract 0x30
 			bankSelect = SerialBuffer[1] - 0x30;
-			Serial.printf("Bank %d active\n", bankSelect);
+			prompt(true);
 			break;
+		
 		}
-	
+		eePutSettings();
 	}
 
 
@@ -802,9 +807,9 @@ void checkSerial(void) {
 				Serial.printf("Loconet server IP %s\n", bootController.tcpIP);
 				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
 			}
-
-			Serial.printf("PCA min %d\n\n", bootController.PCAservoMin);
-			Serial.printf("PCA max %d\n\n", bootController.PCAservoMax);
+			prompt();
+			Serial.printf("PCA min %d\n", bootController.PCAservoMin);
+			Serial.printf("PCA max %d\n", bootController.PCAservoMax);
 		}
 
 		if (SerialBuffer[0] == 'S') {
@@ -838,22 +843,23 @@ void checkSerial(void) {
 		}
 
 		if (SerialBuffer[0] == '?') {
+			Serial.println(F("R=reboot"));
 			Serial.println(F("S=set SSID"));
 			Serial.println(F("W=set SSID pwd"));
 			Serial.println(F("T=set TCP server IP"));
 			Serial.println(F("P=set TCP server port"));
-			Serial.println(F("D=dump param buffer"));
-			Serial.println(F("R=reboot"));
-			Serial.println(F("M=mode"));
-			Serial.println(F("X=dump WIFI params\n\n"));
-			Serial.println(F("x=dump servo params"));
+			Serial.println(F("M=LocoNet mode"));
+			Serial.println(F("V=toggle verbose"));
+			Serial.println(F("X=dump WIFI params\n"));
 			Serial.println(F("s=setup servo"));
 			Serial.println(F("a=setup aspect"));
 			Serial.println(F("A=setup MAS aspect"));
 			Serial.println(F("k=setup a sensor"));
+			Serial.println(F("x=dump servo params"));
 			Serial.println(F("p=command a pin"));
 			Serial.println(F("r=set servo rate"));
 			Serial.println(F("d or D=emulate DCC command"));
+			prompt();
 		}
 
 		if (SerialBuffer[0] == 'R') {
@@ -898,6 +904,7 @@ void checkSerial(void) {
 				Serial.println(F("Now you must REBOOT\n\n"));
 				eePutSettings();
 			}
+			prompt();
 		}
 
 
@@ -910,7 +917,6 @@ void checkSerial(void) {
 			else {
 				Serial.println(F("verbose OFF\n"));
 			}
-
 		}
 
 		//+++ SERVO SIGNAL AND SENSOR RELATED commands +++
@@ -919,10 +925,8 @@ void checkSerial(void) {
 		//ignorePower is default true and will ignore dcc power off commands
 		if (SerialBuffer[0] == 'a') {
 			bool resolved = true;
-
 			//detokenize
-			char* pch;
-			int i = 0;
+			i = 0;
 			pch = strtok(SerialBuffer, " ,");
 
 			while (pch != NULL) {
@@ -952,34 +956,48 @@ void checkSerial(void) {
 			}
 
 			if (((i == 4) || (i == 5)) && resolved) {
-				Serial.println("OK");
-				//match to a pin member of servoslot and copy it over  
-				for (auto& vs : virtualservoCollection) {
-					if (vs.pin == vsParse.pin) {
-						//clear vsParse.aspectParameters to MAS_EMPTY_VAL, as this array is only used by multi aspect signals
-						vs = vsParse;  //copy over from vsParse
-						memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-						vs.deviceType = DEVICE_ASPECT;
-						vs.state = ASPECT_CLOSED;
-						vs.ignorePowerParameter = true;
-						vs.continuous = false;  //default setting
-						vs.bank = 0;
-						vs.rate = 0;
-						ESPservoAttach(vs.pin, false);
-						//write to EEPROM
-						bootController.isDirty = true;
-						eePutSettings();
-						break;
-					}
+				vsParse.deviceType = DEVICE_ASPECT;
+				vsParse.state = ASPECT_CLOSED;
+				vsParse.ignorePowerParameter = true;
+				vsParse.continuous = false;  //default setting
+				vsParse.rate = 0;
+
+				// A lambda expression acts as a local function within a function
+				// [] allows local scope variables to be passed in, default is read only by value
+				auto localHelper = [vsParse](VIRTUALSERVO &vs) {
+					if (vs.pin != vsParse.pin) return;
+					vs = vsParse;  //copy over from vsParse
+					memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+					vs.bank = bankSelect;
+					bankSelect == 0? ESPservoAttach(vs.pin, false):PCAservoWrite(&vs, bankSelect, true);
+					bootController.isDirty = true;
+					return;
+				};
+
+				switch (bankSelect)
+				{
+				case 0:
+					//match to a pin member of servoslot and copy it over  
+					for (auto& vs : virtualservoCollection) {localHelper(vs);}
+					break;
+
+				case 1:
+					for (auto& vs : virtualservoCollectionBank1) {localHelper(vs);}
+					break;
+
+				case 2:
+					for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
+					break;
 				}
 
+				prompt(true);
+				eePutSettings();
 			}
 			else {
 				Serial.println(F("bad command. usage a pin,addr,invert,[ignorePower]"));
+				prompt();
 			}
-
 		}
-
 
 		//SERVO set-up command. Usage: s pin, addr, swing, invert, [continuous]
 		if (SerialBuffer[0] == 's') {
@@ -987,15 +1005,14 @@ void checkSerial(void) {
 			vsParse.deviceType = DEVICE_SERVO;
 			vsParse.ignorePowerParameter = true;
 			vsParse.continuous = false; 
-			vsParse.bank = 0;
+			vsParse.bank = bankSelect;
 			vsParse.position = 90;
 			vsParse.rate = 0;
 			vsParse.state = SERVO_TO_CLOSED;
 
 			//detokenize
 			bool resolved = true;
-			char* pch;
-			int i = 0;
+			i = 0;
 			pch = strtok(SerialBuffer, " ,");
 			
 			while (pch != NULL) {
@@ -1031,35 +1048,54 @@ void checkSerial(void) {
 
 			if (resolved && ((i == 6) || (i == 5))) {
 				//[continuous] is optional, accept 5 || 6
-				Serial.println("OK");
-				//match to a pin member of virtualservoCollection and copy it over
+			//match to a pin member of virtualservoCollection and copy it over
 
-				for (auto& vs : virtualservoCollection) {
-					if (vs.pin != vsParse.pin) continue;
-					//copy servoParse to vs
+				auto localHelper = [vsParse](VIRTUALSERVO& vs) {
+					if (vs.pin != vsParse.pin) return;
 					vs = vsParse;
 					memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-
-					//write to EEPROM
 					bootController.isDirty = true;
-					eePutSettings();
+					return;
+				};
+
+				//2026-05-25 need to match to bank1 and 2 also
+				switch (bankSelect)
+				{
+				case 0:
+					//match to a pin member of servoslot and copy it over  
+					for (auto& vs : virtualservoCollection) { localHelper(vs); }
+					break;
+
+				case 1:
+					for (auto& vs : virtualservoCollectionBank1) { localHelper(vs); }
+					break;
+
+				case 2:
+					for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
 					break;
 				}
+
+				//write to EEPROM
+				prompt(true);
+				eePutSettings();
+				 
 			}
 			else
 			{
 				Serial.println("bad command. usage s pin,addr,swing,invert,[continuous]");
+				prompt();
 			}
 
 		}
+	
+	
 
 		//PIN ACTION. Usage: p pin, c|t|T|n , [power]
 		// where closed|thrown|TOGGLE|neutral
 		//power is 1|0 and only affects aspects
 		if (SerialBuffer[0] == 'p') {
 			//detokenize
-			char* pch;
-			int i = 0;
+			i = 0;
 			pch = strtok(SerialBuffer, " ,");
 			int p = -1;
 			bool resolved = true;
@@ -1071,25 +1107,42 @@ void checkSerial(void) {
 					p = strtol(pch, NULL, 10);
 					resolved = validatePin(p);
 					if (!resolved) break;
-
-					//p is valid, use this to lookup the servoslot
-					for (auto& vs : virtualservoCollection) {
-						if (vs.pin != p) continue;
-						//use a pointer because we subsequently want to modify the collection item, not copy data to it
-						vsPointer = (VIRTUALSERVO*)&vs;
-
-						//2026-03-09 if this is a MAS signal, this command will not work
-						if (vs.deviceType == DEVICE_MAS) {
-							Serial.println(F("Cannot use command on MAS aspect"));
-							resolved = false;
+									
+					switch (bankSelect) {
+					case 0:
+						for (auto& vs : virtualservoCollection) {
+							if (vs.pin != p) continue;
+							//use a pointer because we subsequently want to modify the collection item
+							vsPointer = (VIRTUALSERVO*)&vs;
+							break;
 						}
-
-						if (vs.deviceType == DEVICE_SENSOR) {
-							Serial.println(F("Cannot use command on a sensor"));
-							resolved = false;
+					case 1:
+						for (auto& vs : virtualservoCollectionBank1) {
+							if (vs.pin != p) continue;
+							vsPointer = (VIRTUALSERVO*)&vs;
+							break;
+						}
+					case 2:
+						for (auto& vs : virtualservoCollectionBank2) {
+							if (vs.pin != p) continue;
+							vsPointer = (VIRTUALSERVO*)&vs;
+							break;
 						}
 					}
+					if (vsPointer == nullptr) { resolved = false;break; }
+
+					//2026-03-09 if this is a MAS signal or a sensor this command will not work
+					if (vsPointer->deviceType == DEVICE_MAS) {
+						Serial.println(F("Cannot use p command on MAS aspect"));
+						resolved = false;
+					}
+
+					if (vsPointer->deviceType == DEVICE_SENSOR) {
+						Serial.println(F("Cannot use p command on a sensor"));
+						resolved = false;
+					}
 					break;
+
 
 				case 2:
 					if (vsPointer == nullptr) { resolved = false;break; }
@@ -1134,11 +1187,12 @@ void checkSerial(void) {
 			}
 
 			if (resolved && ((i == 3) || (i == 4))) {
-				Serial.println("OK");
+				prompt(true);
 			}
 			else
 			{
 				Serial.println("bad command. usage p pin,t|c|n|T,[power]");
+				prompt();
 			}
 
 		}
@@ -1147,13 +1201,19 @@ void checkSerial(void) {
 		//EMULATE a dcc command.  This will affect all servos/aspects at a given dcc address
 		//this code block can support T=toggle and n=neutral, which are not themselves a DCC command
 		//usage: d addr,t|n|T|c,[power]
+
+		//To do 2026-05-30 this command now needs to search all 3 banks.
 		if (SerialBuffer[0] == 'd') {
-			char* pch;
-			int i = 0;
-			pch = strtok(SerialBuffer, " ,");
-			int p = -1;
+			bool power;
 			int address = -1;
 			bool resolved = true;
+			char commandedState = 'T';
+			i = 0;
+			pch = strtok(SerialBuffer, " ,");
+
+			//refactor. current code iterates vsCollection twice. if we instead pull params into variables
+			//and iterate all banks once
+
 
 			while (pch != NULL) {
 				switch (i++) {
@@ -1164,66 +1224,99 @@ void checkSerial(void) {
 					break;
 
 				case 2:
-					//command.  Iterate all servos and execute on all matching addresses
-					//the command only operates on DEVICE_SERVO and DEVICE_ASPECT
-					for (auto& vs : virtualservoCollection) {
-						if (vs.address != address) continue;
-						if ((vs.deviceType != DEVICE_SERVO) && (vs.deviceType != DEVICE_ASPECT)) continue;
-
-
-						switch (pch[0]) {
-						case 't':
-							vs.state = vs.deviceType==DEVICE_SERVO ? SERVO_TO_THROWN : ASPECT_THROWN;
-							break;
-						case 'n':
-							vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_NEUTRAL : ASPECT_CLOSED;
-							break;
-						case 'T':
-							if (vs.deviceType == DEVICE_SERVO) {
-								vs.state = (vs.state == SERVO_CLOSED) ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
-							}
-							else {
-								vs.state = (vs.state == ASPECT_THROWN) ? ASPECT_CLOSED : ASPECT_THROWN;
-							}
-							break;
-						default: //also covers closed
-							vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_TO_CLOSED : ASPECT_CLOSED;
-						}
+					switch (pch[0]) {
+					case 't':
+					case 'n':
+					case 'T':
+						commandedState = pch[0];
+						break;
+					default:
+						commandedState = 'c';
 					}
 					break;
+
 				case 3:
-					//power.  Iterate all servos and execute on all matching addresses
-					for (auto& vs : virtualservoCollection) {
-						if (vs.address != address) continue;
-						//power is only applicable to servo and aspect
-						if ((vs.deviceType != DEVICE_SERVO) && (vs.deviceType != DEVICE_ASPECT)) continue;
-						vs.power = pch[0] == '1' ? true : false;
-					}
+					power = pch[0] == '1' ? true : false;
 					break;
+					
 				}
 				pch = strtok(NULL, " ,");
 				if (!resolved) break;
 			}
 
 			if (resolved && ((i == 3) || (i == 4))) {
-				Serial.println("OK");
+				
+				//A lambda function acts as a local function within a function
+				//[] allows local scope vars to be passed in, default is by val readonly
+				auto localHelper = [commandedState,address,power](VIRTUALSERVO& vs) {
+					//execute command.  Iterate all servos and execute on all matching addresses
+					//the command only operates on DEVICE_SERVO and DEVICE_ASPECT
+					if (vs.address != address) return;
+					if ((vs.deviceType != DEVICE_SERVO) && (vs.deviceType != DEVICE_ASPECT)) return;
+
+					switch (commandedState) {
+					case 't':
+						vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_TO_THROWN : ASPECT_THROWN;
+						break;
+					case 'n':
+						vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_NEUTRAL : ASPECT_CLOSED;
+						break;
+					case 'T':
+						if (vs.deviceType == DEVICE_SERVO) {
+							vs.state = (vs.state == SERVO_CLOSED) ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
+						}
+						else {
+							vs.state = (vs.state == ASPECT_THROWN) ? ASPECT_CLOSED : ASPECT_THROWN;
+						}
+						break;
+					default: //also covers closed
+						vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_TO_CLOSED : ASPECT_CLOSED;
+					}
+					vs.power = power;
+					return;
+				};
+
+
+				
+				switch (bankSelect)
+				{
+				case 0:
+					//match to a pin member of servoslot and copy it over  
+					for (auto& vs : virtualservoCollection) {localHelper(vs);}
+					break;
+
+				case 1:
+					for (auto& vs : virtualservoCollectionBank1) {localHelper(vs);}
+					break;
+
+				case 2:
+					for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
+					break;
+				}
+				
+
+			prompt(true);
 			}
+			
 			else
 			{
 				Serial.println("bad command. usage d address,t|c|T|n,[power]");
+				prompt();
 			}
 
 		}
 
 		//EMULATE a dcc command for Multi Aspect Signal.  This will affect all MAS at a given dcc address
 		//usage: D addr,state
+		//To do 2026-05-30 this command now needs to search all 3 banks.
+
 		if (SerialBuffer[0] == 'D') {
-			char* pch;
-			int i = 0;
-			pch = strtok(SerialBuffer, " ,");
 			int address = -1;
 			bool resolved = true;
-
+			uint8_t commandedState = 0;
+			i = 0;
+			pch = strtok(SerialBuffer, " ,");
+			
 			while (pch != NULL) {
 				switch (i++) {
 				case 1:
@@ -1232,96 +1325,123 @@ void checkSerial(void) {
 					resolved = validateAddress(address);
 					break;
 				case 2:
-					//state command.  Iterate all MAS and execute on all matching addresses
-					uint8_t state = strtol(pch, NULL, 10);
-
-					for (auto& vs : virtualservoCollection) {
-						if (vs.address != address) continue;
-						if (vs.deviceType != DEVICE_MAS) continue;
-						vs.MASstate = state;
-						MAScommandSync = false;
-						assertMASoutput(vs);
-						if (verbose) Serial.printf("Mas to %d\n",state);
-					}
+					//state command  
+					commandedState = strtol(pch, NULL, 10);
 					break;
 				}
 				pch = strtok(NULL, " ,");
 				if (!resolved) break;
 			}
 
-			if (resolved && (i >= 3)) Serial.println("OK MAS");
+			if (resolved && (i >= 3)) {
+				//Iterate all MAS and execute on all matching addresses
+				if (verbose) Serial.printf("Mas to %d\n", commandedState);
+				//run through all 3 banks and command all DEVICE_MAS with matching DCC address
+				for (auto& vs : virtualservoCollection) {
+					if (vs.address != address) continue;
+					if (vs.deviceType != DEVICE_MAS) continue;
+					vs.MASstate = commandedState;
+					MAScommandSync = false;
+					assertMASoutput(vs,0);
+				}
+				for (auto& vs : virtualservoCollectionBank1) {
+					if (vs.address != address) continue;
+					if (vs.deviceType != DEVICE_MAS) continue;
+					vs.MASstate = commandedState;
+					MAScommandSync = false;
+					assertMASoutput(vs,1);
+				}
+				for (auto& vs : virtualservoCollectionBank2) {
+					if (vs.address != address) continue;
+					if (vs.deviceType != DEVICE_MAS) continue;
+					vs.MASstate = commandedState;
+					MAScommandSync = false;
+					assertMASoutput(vs, 2);
+				}
+				prompt(true);
+			}
+			else {
+				prompt();
+			}
 		}
 
 		//SENSOR command. sets up a sensor on a given pin, by default will be WPU a zero param is given
 		//some pins have pulldowns on the board and the WPU may not be enough to overcome these.
 		//usage k pin address [wpu]
+		//To do 2026-05-30 this command can only work on bank 0
 		if (SerialBuffer[0] == 'k') {
-			char* pch;
-			int i = 0;
-			pch = strtok(SerialBuffer, " ,");
-			int p = -1;
-			int address = -1;
-			bool resolved = true;
-			//default setting
-			vsParse.deviceType = DEVICE_SENSOR;
-			vsParse.ignorePowerParameter = true;
-			vsParse.continuous = false; 
-			vsParse.position =0;
-			vsParse.state = SERVO_BOOT;
+			if (bankSelect != 0) {
+				Serial.println(F("Sensors only supported on bank 0"));
+				prompt();
+			}
+			else {
+				//this is bank 0
+				char* pch;
+				int i = 0;
+				pch = strtok(SerialBuffer, " ,");
+				int p = -1;
+				int address = -1;
+				bool resolved = true;
+				//default setting
+				vsParse.deviceType = DEVICE_SENSOR;
+				vsParse.ignorePowerParameter = true;
+				vsParse.continuous = false;
+				vsParse.position = 0;
+				vsParse.state = SERVO_BOOT;
 
-			while (pch != NULL) {
-				switch (i++) {
-				case 1:
-					p = strtol(pch, NULL, 10);
-					resolved = validatePin(p);
+				while (pch != NULL) {
+					switch (i++) {
+					case 1:
+						p = strtol(pch, NULL, 10);
+						resolved = validatePin(p);
+						if (!resolved) break;
+						vsParse.pin = p;
+						break;
+
+					case 2:
+						//resolve address
+						address = strtol(pch, NULL, 10);
+						resolved = validateAddress(address);
+						vsParse.address = address;
+						break;
+
+					case 3:
+						//optional WPU
+						if (strtol(pch, NULL, 10) == 0) break;
+						vsParse.deviceType = DEVICE_SENSOR_WPU;
+						break;
+					}
+
+					pch = strtok(NULL, " ,");
 					if (!resolved) break;
-					vsParse.pin = p;
-					break;
-
-				case 2:
-					//resolve address
-					address = strtol(pch, NULL, 10);
-					resolved = validateAddress(address);
-					vsParse.address = address;
-					break;
-
-				case 3:
-					//optional WPU
-					if (strtol(pch, NULL, 10) == 0) break;
-					vsParse.deviceType = DEVICE_SENSOR_WPU;
-					break;
-				}
-			
-				pch = strtok(NULL, " ,");
-				if (!resolved) break;
-			}
-
-			if (resolved && (i >= 2)) {
-				Serial.println("OK");
-				for (auto& vs : virtualservoCollection) {
-					if (vs.pin != vsParse.pin) continue;
-					//copy servoParse to vs
-					vs = vsParse;
-					memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-					ESPservoAttach(vs.pin, false);
-					//write to EEPROM
-					bootController.isDirty = true;
-					eePutSettings();
-					break;
 				}
 
+				if (resolved && (i >= 2)) {
+					for (auto& vs : virtualservoCollection) {
+						if (vs.pin != vsParse.pin) continue;
+						//copy servoParse to vs
+						vs = vsParse;
+						memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+						ESPservoAttach(vs.pin, false);
+						//write to EEPROM
+						bootController.isDirty = true;
+						eePutSettings();
+						break;
+					}
+					prompt(true);
+				}
+				else
+				{
+					Serial.println("bad command. usage k pin address [wpu]");
+					prompt();
+				}
 			}
-			else
-			{
-				Serial.println("bad command. usage k pin address [wpu]");
-			}
-
 		}
 
 		
-
 		//RATE command. sets a positive or negative rate on the servo swing.
 		//usage r pin rate, where rate is + or -ve integer, useful values are -10 to +10
+		//To do 2026-05-30 this command now needs to act on the activeBank.
 		if (SerialBuffer[0] == 'r') {
 			char* pch;
 			int i = 0;
@@ -1338,10 +1458,25 @@ void checkSerial(void) {
 					if (!resolved) break;
 
 					//p is valid, use this to lookup the servoslot
-					for (auto& vs : virtualservoCollection) {
+					switch (bankSelect) {
+					case 0:
+						for (auto& vs : virtualservoCollection) {
 						if (vs.pin != p) continue;
-						//use a pointer because we subsequently want to modify the collection item, not copy data to it
+						//use a pointer because we subsequently want to modify the collection item
 						vsPointer = (VIRTUALSERVO*)&vs;
+						}
+						break;
+					case 1:
+						for (auto& vs : virtualservoCollectionBank1) {
+							if (vs.pin != p) continue;
+							vsPointer = (VIRTUALSERVO*)&vs;
+						}
+						break;
+					case 2:
+						for (auto& vs : virtualservoCollectionBank2) {
+							if (vs.pin != p) continue;
+							vsPointer = (VIRTUALSERVO*)&vs;
+						}
 					}
 					break;
 
@@ -1359,14 +1494,15 @@ void checkSerial(void) {
 			}
 
 			if (resolved && (i == 3)) {
-				Serial.println("OK");
 				vsPointer->rate = rate;
 				bootController.isDirty = true;
+				prompt(true);
 				eePutSettings();
 			}
 			else
 			{
 				Serial.println("bad command. usage r pin rate");
+				prompt();
 			}
 		}
 
@@ -1385,11 +1521,11 @@ void checkSerial(void) {
 		}
 
 
-		//DUMP all servo/aspect information
+		//DUMP all servo/aspect information for the activeBank
 		if (SerialBuffer[0] == 'x') {
 
-			for (auto vs : virtualservoCollection) {
-				//rewrite as switch
+			//lambda expression acts as a local function within a function
+			auto localHelper = [](VIRTUALSERVO vs) {
 				switch (vs.deviceType) {
 				case DEVICE_SENSOR:
 				case DEVICE_SENSOR_WPU:
@@ -1445,7 +1581,7 @@ void checkSerial(void) {
 					Serial.print(vs.invert, DEC);
 
 					Serial.print(F("  output "));
-					switch (assertMASoutput(vs)) {
+					switch (assertMASoutput(vs,bankSelect)) {
 					case 0:
 						Serial.print("0 ");
 						break;
@@ -1457,7 +1593,7 @@ void checkSerial(void) {
 						Serial.print("tristate ");
 					}
 
-					//now the param arrays
+					//now dump param arrays
 					bool noSpace = true;
 					for (uint8_t a = 0;a < 32;a++) {
 						if (a == 0) {
@@ -1516,9 +1652,24 @@ void checkSerial(void) {
 						//Serial.print(" AT ");
 					//}else{ Serial.print(" U "); }
 
-
 				Serial.print("\n");
+				return;
+			};
+			
+			switch (bankSelect) {
+			case 0:
+				for (auto& vs : virtualservoCollection) { localHelper(vs); }
+				break;
+			case 1:
+				for (auto& vs : virtualservoCollectionBank1) { localHelper(vs); }
+				break;
+			case 2:
+				for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
+				break;
 			}
+
+			prompt();
+
 		}
 
 
@@ -1528,7 +1679,7 @@ void checkSerial(void) {
 			vsParse.pin = -1;
 			vsParse.address = -1;
 			char* pch;
-			uint8_t i = 0;   //i is a state engine, its not auto incremented in the switch statement because there's a sub-state engine in case 4,5,6,7
+			i = 0;   //i is a state engine, its not auto incremented in the switch statement because there's a sub-state engine in case 4,5,6,7
 			pch = strtok(SerialBuffer, " ,");
 			bool resolved = true;
 			uint8_t bufOffset = 0;
@@ -1609,20 +1760,34 @@ void checkSerial(void) {
 			if (resolved) {
 				//all params were captured into vsParse
 
-				for (auto& vs : virtualservoCollection) {
-					if (vs.pin != vsParse.pin) continue;
-					//copy received data to the item
+				auto localHelper = [vsParse](VIRTUALSERVO& vs) {
+					if (vs.pin != vsParse.pin) return;
 					vs = vsParse;
 					memcpy(vs.aspectParameters, vsParse.aspectParameters, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-					ESPservoAttach(vs.pin, false);
+					//bank0 will attach, banks1+2 will assertMASoutput
+					bankSelect == 0 ? ESPservoAttach(vs.pin, false) : (void) assertMASoutput(vs, bankSelect);
+					bootController.isDirty = true;
+					return;
+					};
+
+				switch (bankSelect) {
+				case 0:
+					for (auto& vs : virtualservoCollection) { localHelper(vs); }
+					break;
+				case 1:
+					for (auto& vs : virtualservoCollectionBank1) { localHelper(vs); }
+					break;
+				case 2:
+					for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
 					break;
 				}
-				bootController.isDirty = true;
+
 				eePutSettings();
-				Serial.println("OK");
+				prompt(true);
 			}
 			else {
 				Serial.println(F("Error parsing command. Usage A pin addr invert [hi] [lo] [hi-flash] [low-flash]"));
+				prompt();
 			}
 
 		}
@@ -1647,9 +1812,18 @@ void checkSerial(void) {
 	/// <param name="p">pin number</param>
 	/// <returns>true if valid</returns>
 bool validatePin(int p) {
-	if ((p < ESP_BASE_PIN) || (p >= ESP_BASE_PIN + ESP_TOTAL_PINS)) {
-		Serial.printf("bad pin %d\n",p);
-		return false;
+	if (bankSelect == 0) {
+		if ((p < ESP_BASE_PIN) || (p >= ESP_BASE_PIN + ESP_TOTAL_PINS)) {
+			Serial.printf("bad pin %d\n", p);
+			return false;
+		}
+	}
+	else {
+		//PCA banks 1 and 2 have 16 outputs
+		if ((p < 0) || (p > 16)){
+			Serial.printf("bad pin %d\n", p);
+			return false;
+		}
 	}
 	return true;
 }
@@ -1814,7 +1988,7 @@ uint8_t parseBracketedParameters(char* token, uint8_t* result) {
 /// </summary>
 /// <param name="vs">target virtual servo</param>
 /// <returns>pin output state just set: 0 low, 1 hi, 2 tristate.</returns>
-uint8_t assertMASoutput(VIRTUALSERVO vs) {
+uint8_t assertMASoutput(VIRTUALSERVO vs, uint8_t bank) {
 	/*All MAS pins will boot as power=off, i.e. tristate
 	* if no MAS command code is reserved, we exit tristate
 	* flash-lo and flash-hi, if resolved are gated with the LEDstate. This allows a pin to go low-high flashing if the same command
@@ -1869,26 +2043,51 @@ uint8_t assertMASoutput(VIRTUALSERVO vs) {
 
 	}
 
-	uint8_t gpioPin = NodeMCUmap[vs.pin];
-	
-	//assert the output pin, also process invert
-	switch (outputState) {
-	case TRISTATE:
-		pinMode(gpioPin, INPUT);
-		break;
+	if (bank == 0) {
+		uint8_t gpioPin = NodeMCUmap[vs.pin];
 
-	case LO:
-		outputState = vs.invert ? HI : LO;
-		pinMode(gpioPin, OUTPUT);
-		digitalWrite(gpioPin, outputState == LO ? LOW : HIGH);
-		break;
+		//assert the output pin, also process invert
+		switch (outputState) {
+		case TRISTATE:
+			pinMode(gpioPin, INPUT);
+			break;
 
-	case HI:
-		outputState = vs.invert ? LO : HI;
-		pinMode(gpioPin, OUTPUT);
-		digitalWrite(gpioPin, outputState == LO ? LOW : HIGH);
-		break;
+		case LO:
+			outputState = vs.invert ? HI : LO;
+			pinMode(gpioPin, OUTPUT);
+			digitalWrite(gpioPin, outputState == LO ? LOW : HIGH);
+			break;
 
+		case HI:
+			outputState = vs.invert ? LO : HI;
+			pinMode(gpioPin, OUTPUT);
+			digitalWrite(gpioPin, outputState == LO ? LOW : HIGH);
+			break;
+
+		}
+	}
+	else {
+	//bank 1 or 2.  These are PCA and do not support tristate.
+		//vs is a copy, not by ref.  but that said, if we can inspect members of aspectParameters, these cannot be copied so means 
+		//vs is ref, hence we can modify it.  we need to translate these output states to 0 pwm and 4096 pwm
+		switch (outputState) {
+		case HI:
+			outputState = vs.invert ? LO : HI;
+			break;
+		default:
+			//drive low, whether we want LO or TRISTATE
+			outputState = vs.invert ? HI : LO;
+		}
+
+		//only invoke .setPWM if we have working I2C comms with the module.  Otherwise a WDT timeout will occur due to the library
+		if (bootController.hasPCA9685modules){
+			if (bank == 1) {
+				outputState == HI ? PCAbank1.setPWM(vs.pin, 0, 4096) : PCAbank1.setPWM(vs.pin, 4096, 0);
+			}
+			else {
+				outputState == HI ? PCAbank2.setPWM(vs.pin, 0, 4096) : PCAbank2.setPWM(vs.pin, 4096, 0);
+			}
+		}
 	}
 
 	return outputState;
@@ -2051,8 +2250,9 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 		if (isPCAbank) continue; 
 		if (p > 0) continue;
 		//initialise Wire on bank0, pins 0 (SCL) and 1 (SDA)
-		//nah, use D4 and D5.   D0 is an RTC pin and prob does not work with Wire.
+		//nah, use D4 and D5.   D0 is an RTC pin and does not work with Wire.
 		Wire.begin(NodeMCUmap[4], NodeMCUmap[5]);  //sda,scl
+		Wire.setClock(400000);
 		vsc[4].deviceType = DEVICE_I2C;
 		vsc[5].deviceType = DEVICE_I2C;
 
@@ -2064,9 +2264,8 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 		nDevices = 0;
 		for (address = 1; address < 127; ++address)
 		{
-			// The i2c_scanner uses the return value of
-			// the Write.endTransmisstion to see if
-			// a device did acknowledge to the address.
+			// The i2c_scanner uses the return value of Write.endTransmisstion
+			// to confirm an device is at the address
 			Wire.beginTransmission(address);
 			error = Wire.endTransmission();
 
@@ -2090,32 +2289,22 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 
 		if (nDevices == 0) {
 			Serial.println(F("No I2C devices found\n"));
+			//disable any calls to the PCA modules because the PCA library will cause a hang and a WDT crash
+			bootController.hasPCA9685modules = false;
 		}
 		else {
 			if (bootController.hasPCA9685modules) {
-				//IMPORTANT: Wire must be started before calling pwm.begin
+				//IMPORTANT: Wire must be started before calling pwm.begin, and if no PCA devices are present
+				//the PWM libary will cause a WDT timeout
 				PCAbank1.begin();
 				PCAbank1.setPWMFreq(50);
 				delay(10);
 				PCAbank2.begin();
 				PCAbank2.setPWMFreq(50);
 				Serial.println(F("boot PCA modules"));
-				
-				//debug, this works
-				//PCAbank1.setPin(0, 4000, false);
-				//PCAbank1.setPin(15, 1024, true);
-
-
 			}
-
-
 		}
 		//there's no means to check a device is a PCA device as these do not have ID codes
-
-
-
-
-
 	}
 }
 
@@ -2254,10 +2443,11 @@ void processServo(void) {
 	static VIRTUALSERVO* vsBoot = nullptr;
 	static uint8_t bootTimer = 0;
 	static uint8_t tick;
+		
+#ifdef SYNC_PULSE
+	digitalWrite(NodeMCUmap[8], HIGH);
+#endif
 	
-	//IMPORTANT: vs.pin does represent the GPIO pin and not the ordinal in the virtualServoCollection
-
-
 	if (tick++ > 33) {
 		//0.5sec counter used to toggle MAS leds and also sync to the edge
 		tick = 0;
@@ -2272,7 +2462,13 @@ void processServo(void) {
 	//for signal aspects, we move from ASPECT_CLOSED or ASPECT_THROWN straight to the antiphase, and we heed the .power parameter
 
 	for (auto& vs : virtualservoCollection) {
-		if (vs.pin > 8) continue;  //invalid pin
+
+#ifdef  SYNC_PULSE
+		if (vs.pin > 7) continue;
+#else
+		if (vs.pin >= ESP_TOTAL_PINS) continue;  //ignore invalid pins
+#endif 
+		
 
 		uint8_t maxPosition = vs.swing + 90;
 		uint8_t minPosition = 90 - vs.swing;
@@ -2283,7 +2479,6 @@ void processServo(void) {
 		//.timeDelay is used for -ve rate values
 		vs.timeDelay += vs.timeDelay < 0 ? 1 : 0;
 		
-
 		switch (vs.state) {
 		case SERVO_NEUTRAL:
 			vs.position = 90;
@@ -2368,7 +2563,7 @@ void processServo(void) {
 		case ASPECT_MULTIPLE:
 			// MAScommandSync is set by an LEDstate edge, thus synchronising all changes with the master LED clock.
 			// this prevents short-duration flashses when changing to one of the MAS flashing aspects
-			if (MAScommandSync) assertMASoutput(vs);
+			if (MAScommandSync) assertMASoutput(vs,0);
 			break;
 
 
@@ -2481,21 +2676,13 @@ void processServo(void) {
 		//update servo positions every 15ms
 		if (vs.deviceType==DEVICE_SERVO) ESPservoWrite(vs.pin, vs.position);
 
-		//2026-05-11 need to modify this to handle PCA servos or aspects or MAS
-
+		
 	} //end of auto virtualServoCollection, aka BANK 0
 
 	
 	if (!bootController.hasPCA9685modules) return;
 
 	for (uint8_t activeBank = 1;activeBank < 3;activeBank++) {
-
-		//debug, we might run out of time.  We are seeing Soft WDT resets after bank2 boots
-		//yup, exiting before we process bank2 prevents the WDT.  yield() just causes and immedate crash
-		//i think i either need to speed up this loop (it does call float math a lot) or slow down calls to the loop
-		//and loose resolution on servo movements.
-
-		if (activeBank == 2) break;  //temp fix for WDT resets
 	
 	VIRTUALSERVO(*ptrToVSC)[16] = &virtualservoCollectionBank1;  //this points to entire array and does not decay to first element
 	if (activeBank == 2) ptrToVSC = &virtualservoCollectionBank2;
@@ -2530,7 +2717,6 @@ void processServo(void) {
 						vs.state = vs.deviceType == DEVICE_MAS ? ASPECT_MULTIPLE : ASPECT_CLOSED;
 						vsBoot = nullptr;
 						bootTimer = 0;
-						//ESPservoAttach(vs.pin, false);  //no need to attach
 						break;
 					}
 				}
@@ -2570,6 +2756,9 @@ void processServo(void) {
 
 				if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
 					vs.state = SERVO_CLOSED;
+					//detach if required and break
+					PCAservoWrite(&vs, activeBank, vs.continuous);
+					break;
 				}
 
 				PCAservoWrite(&vs, activeBank, true);
@@ -2590,42 +2779,66 @@ void processServo(void) {
 
 				if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
 					vs.state = SERVO_THROWN;
+					//detach if required and break
+					PCAservoWrite(&vs, activeBank, vs.continuous);
+					break;
 				}
 
 				PCAservoWrite(&vs, activeBank, true);
 				break;
 
 			case SERVO_THROWN:
-				vs.position = vs.invert ? minPosition : maxPosition;
-				PCAservoWrite(&vs, activeBank, vs.continuous);
+				//vs.position = vs.invert ? minPosition : maxPosition;
+				//PCAservoWrite(&vs, activeBank, vs.continuous);
+				//do nothing. PWM will continue to send per last instruction if required, else it was instructed to detach
 				break;
 
 			case SERVO_CLOSED:
-				vs.position = vs.invert ? maxPosition : minPosition;
-				PCAservoWrite(&vs, activeBank, vs.continuous);
+				//vs.position = vs.invert ? maxPosition : minPosition;
+				//PCAservoWrite(&vs, activeBank, vs.continuous);
 
 				break;
+
+
+				//2026-06-05 what about MAS????
+
 
 
 			}//end switch
 
 
-			//update servo positions every 15ms
-			//if (vs.deviceType == DEVICE_SERVO) PCAservoWrite(vs, activeBank);
+			//Note: if servo positions need updating (i.e. pwm value needs to change) that is done in the code block above
+			//including any calls to PCAservoWrite
+			//the PCA hardware will continue to send the same pwm value indefinately so even if we need vs.continuous, we don't actually
+			//need an I2C write to the PCA hardware.
+						
+			
+			//2026-05-24 re-introduce for process-time test. 
+			//if (vs.deviceType == DEVICE_SERVO) PCAservoWrite(&vs, activeBank,true);
 
 		}
 
 	}//for loop
 
+#ifdef SYNC_PULSE
+	digitalWrite(NodeMCUmap[8], LOW);  
+#endif
+	/*2026-05-24 note on speed tests.  With 160MHz clock, this entire routine executes within 160uS, or at most 1mS when I2C commands are issued to a servo
+	this is well within a 15mS repeat call period.  My concerns that the floating point math might take too long are not bourne out.
+	It is possible, I suppose, that if all PCA servos were commanded to move at once then  we might exceed the 15mS repeat-call interval.
 
 
+	with two full PCAbanks, and continuous calls to update each PWM pin (32 of) over I2C @ 400KHz, the routine takes 6.83mS
+	we can reduce this by means of a change flag, as PWM only needs to be written if there is a change. The PCA hardware itself will keep transmitting 
+	the same PWM independent of further I2C instructions.
+
+	refactor: at the point we are about to set SERVO_THROWN|CLOSED we check whether we want continuous or not.  if no, then set pwm to zero
+	if yes, then do nothing, as the PCA will continue with the last PWM setting.
+	then in SERVO_THROWN|CLOSED itself, we do nothing.
+
+
+	*/
 }
-
-
-
-
-
-
 
 
 
@@ -2644,13 +2857,16 @@ PCAbank1.setOutputMode(totem);  true for totem outputs, false for open drain. th
 
 
 /// <summary>
-/// accepts a virtual servo member, processes it and modifies it
+/// accepts a virtual servo member, processes it per position and updates it
 /// </summary>
 /// <param name="vs">target vs</param>
 /// <param name="bank">bank 1 or 2</param>
-/// <param name="attach">true if pwm active</param>
+/// <param name="attach">true if pwm active. False sets output hard low.</param>
 void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach) {
+	//the PCA library will cause a hang and WDT crash if no PCA modules present
+	if (!bootController.hasPCA9685modules) return;
 	if (vs->pin > 15) return;
+	if (bank == 0) return;
 	if (attach) {
 		float d = vs->position / 180.0;
 		d *= (bootController.PCAservoMax - bootController.PCAservoMin);  //full range
@@ -2675,7 +2891,11 @@ void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach) {
 		vs->power = false;
 }
 
-
-//delay test for PCA processing.  if we have a bit that we take high when we enter the 15mS block and low when we exit, we should see how long the processing takes
-//
-
+static void prompt(bool ok) {
+	//OK
+	//bank0>
+	if (ok) {
+		Serial.println("OK");
+	}
+	Serial.printf("bank %d>\n", bankSelect);
+}

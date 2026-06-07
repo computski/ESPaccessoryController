@@ -1,15 +1,25 @@
 
 /*
 	Name:       ESPaccessoryController
-	Created:	2026-04-07
+	Created:	2026-06-07
 	Author:     J.Ossowski
-	Hardware:	NodeMCU
+	Hardware:	NodeMCU EXP8266
 
-	Note; if this device just acts as a TCP client, then we cannot use it in a system with just it and Panel Pro.
-	It must instead be used as a client on port 1234 with a separate dcc controller acting as a loconet server on 2560
-	alternatively it can connect to the ESP controller directly on port 2560
-	This is because Panel Pro expects to connect as a client when booting.  We'd need to spin up a TCP server here.
-	And even if we did, that's good for only one ESPA, as the second one would need to connect as a client on 1234.
+	This project implements a LocoNet over TCP accessory controller.  It is intended to be used with JMRI Panel Pro.
+
+	There are three configuration options, set with the M command;
+
+	1.LocoNet HOST on home Wifi set
+	2.LocoNet CLIENT on home Wifi
+	3.Stand alone LocoNet HOST 
+	
+	1 & 2 will connect to the home Wifi, same with JRMI Decoder Pro.  With 1, this device acts as a LocoNet host and JRMI will connect to 
+	this device's IP and port.  With 2, this device acts as a client, connecting to another LocoNet host such as my ESP_DCC with railcom DCC controller project.  
+	JRMI also needs to connect to that same LocoNet host.
+
+	With 3, you do not need a home Wifi network.  The JRMI laptop will connect to this device (which acts as a hotspot) and this device will run as a LocoNet host 
+	on its own IP and port.
+	
 
 */
 
@@ -17,8 +27,6 @@
 
 #include "ESPservo.h"
 #include "ESPaccessory.h"
-//#include "LocoNetAccessoryProcessor.h"
-
 
 /*Because the Arduino IDE is rather basic and requires an .INO file, this creates issues because
 modules cannot see functions declared in that .ino file. For this reason, the .INO is used as a shell
@@ -28,8 +36,10 @@ and all the code is moved into modules with their own cpp and hpp headers*/
 using namespace nsESPaccessory;
 
 void setup() {
+	system_update_cpu_freq(160);  //this will double the clock speed from 80MHz
 	ESPservoInit();
 	ESPaccessorySetup();
+
 }
 
 void loop() {
