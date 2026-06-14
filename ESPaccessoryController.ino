@@ -36,7 +36,8 @@ and all the code is moved into modules with their own cpp and hpp headers*/
 using namespace nsESPaccessory;
 
 void setup() {
-	system_update_cpu_freq(160);  //this will double the clock speed from 80MHz
+	//set system frequency from the IDE
+	//system_update_cpu_freq(160);  //this will double the clock speed from 80MHz
 	ESPservoInit();
 	ESPaccessorySetup();
 

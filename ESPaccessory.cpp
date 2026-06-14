@@ -3,6 +3,12 @@
 // 
 
 /*
+2016-06-13 p command on a pin does not seem to work
+*/
+
+
+
+/*
 This module handles all communication whether its Serial commands or LocoNet messages.  It also programs up the three available banks of servos
 bank 0 is the ESP8266 device
 bank 1 is an optional PCA 9685 bank on I2C address 0x40
@@ -116,6 +122,7 @@ void processServo(void);
 
 //Debug testing. Used to measure the execution time within processServo(). This is called every 15mS and must
 //comfortably complete execution within this period before the next call. sync pulse is on D8
+//disable by renaming nSYNC_PULSE
 #define SYNC_PULSE
 
 
@@ -319,10 +326,10 @@ void nsESPaccessory::ESPaccessorySetup() {
 	eeGetSettings();
 	
 	
-//used for debug.  Will output a hi pulse on GPIO16 at the start of the 15mS PWM pulse interval and goes low again when all processing
+//used for debug.  Will output a hi pulse on D8 at the start of the 15mS PWM pulse interval and goes low again when all processing
 //is finished.  This allows you to confirm that all floating point math and code runs comfortably inside this 15mS timer window
 //rename to SYNC_PULSE to enable, nSYNC_PULSE to disable
-#ifdef nSYNC_PULSE
+#ifdef SYNC_PULSE
 	pinMode(NodeMCUmap[8], OUTPUT); 
 #endif
 	
@@ -1093,7 +1100,7 @@ void checkSerial(void) {
 		//PIN ACTION. Usage: p pin, c|t|T|n , [power]
 		// where closed|thrown|TOGGLE|neutral
 		//power is 1|0 and only affects aspects
-		if (SerialBuffer[0] == 'p') {
+		if (SerialBuffer[0] == 'q') {  //disable with q for now
 			//detokenize
 			i = 0;
 			pch = strtok(SerialBuffer, " ,");
@@ -1113,19 +1120,25 @@ void checkSerial(void) {
 						for (auto& vs : virtualservoCollection) {
 							if (vs.pin != p) continue;
 							//use a pointer because we subsequently want to modify the collection item
-							vsPointer = (VIRTUALSERVO*)&vs;
+							vsPointer = &vs;   //don't cast, see if this works...
+							
+							Serial.printf("debug 1 %d %d\n",p, virtualservoCollection[6].pin);
+							vsPointer->rate = -3;
+							Serial.printf("debug 1a %d %d\n", vsPointer->rate, virtualservoCollection[6].rate);
+
+
 							break;
 						}
 					case 1:
 						for (auto& vs : virtualservoCollectionBank1) {
 							if (vs.pin != p) continue;
-							vsPointer = (VIRTUALSERVO*)&vs;
+							vsPointer = &vs;
 							break;
 						}
 					case 2:
 						for (auto& vs : virtualservoCollectionBank2) {
 							if (vs.pin != p) continue;
-							vsPointer = (VIRTUALSERVO*)&vs;
+							vsPointer = &vs;
 							break;
 						}
 					}
@@ -1146,17 +1159,25 @@ void checkSerial(void) {
 
 				case 2:
 					if (vsPointer == nullptr) { resolved = false;break; }
+					Serial.println("debug 2");
 
 					if (vsPointer->deviceType==DEVICE_SERVO) {
 						switch (pch[0]) {
 						case 'c':
 							vsPointer->state = SERVO_TO_CLOSED;
+							Serial.println("debug 3");
 							break;
 						case 't':
 							vsPointer->state = SERVO_TO_THROWN;
+							Serial.println("debug 4");
 							break;
 						case 'n':
 							vsPointer->state = SERVO_NEUTRAL;
+							Serial.printf("stn %d stvs %d\n ", vsPointer->state, virtualservoCollection[6].state);  //debug
+				//i just don't get it.  i can write to .rate and this sticks, but not .state
+							//so unless the timer-int is continually overriding and setting to closed???? wtf
+							
+							
 							break;
 						case 'T':
 							vsPointer->state = vsPointer->state == SERVO_CLOSED ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
@@ -1187,6 +1208,9 @@ void checkSerial(void) {
 			}
 
 			if (resolved && ((i == 3) || (i == 4))) {
+				//debug.  does not work, so despite a pointer to the collection we are not modifying the collection item.  is ptr still a copy?
+				Serial.printf("st %d stvs %d\n ", vsPointer->state, virtualservoCollection[6].state);  //debug
+
 				prompt(true);
 			}
 			else
@@ -1196,6 +1220,122 @@ void checkSerial(void) {
 			}
 
 		}
+
+
+		//rewrite
+		if (SerialBuffer[0] == 'p') {
+			//detokenize
+			i = 0;
+			pch = strtok(SerialBuffer, " ,");
+			int pin = -1;
+			bool resolved = true;
+			char commandedState = 'T';
+			bool power = true;
+
+			while (pch != NULL) {
+				switch (i++) {
+				case 1:
+					//pin
+					pin = strtol(pch, NULL, 10);
+					resolved = validatePin(pin);
+					break;
+				case 2:
+					commandedState = pch[0];
+					switch (commandedState) {
+					case 'c':
+					case 't':
+					case 'T':
+					case 'n':
+						break;
+					default:
+						resolved = false;
+					}
+					break;
+				case 3:
+					//optional [power] param for signal aspects
+					power = pch[0] == '1' ? true : false;
+				}
+
+				pch = strtok(NULL, " ,");
+				if (!resolved) break;
+
+			}
+
+			if (resolved && ((i == 3) || (i == 4))) {
+				
+				//A lambda function acts as a local function within a function
+				//[] allows local scope vars to be passed in, default is by val readonly
+				auto localHelper = [commandedState, pin, power](VIRTUALSERVO& vs) {
+					//execute command.  Iterate all servos and execute on all matching addresses
+					//the command only operates on DEVICE_SERVO and DEVICE_ASPECT
+					//will return the device type, which we can test later
+					if (vs.pin!= pin) return vs.deviceType;
+					if ((vs.deviceType != DEVICE_SERVO) && (vs.deviceType != DEVICE_ASPECT)) return vs.deviceType;
+
+					switch (commandedState) {
+					case 't':
+						vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_TO_THROWN : ASPECT_THROWN;
+						break;
+					case 'n':
+						vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_NEUTRAL : ASPECT_CLOSED;
+						break;
+					case 'T':
+						if (vs.deviceType == DEVICE_SERVO) {
+							vs.state = (vs.state == SERVO_CLOSED) ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
+						}
+						else {
+							vs.state = (vs.state == ASPECT_THROWN) ? ASPECT_CLOSED : ASPECT_THROWN;
+						}
+						break;
+					default: //also covers closed
+						vs.state = vs.deviceType == DEVICE_SERVO ? SERVO_TO_CLOSED : ASPECT_CLOSED;
+					}
+					vs.power = power;
+					return vs.deviceType;
+					};
+
+				uint8_t ret;
+
+				//call helper function for the active bank
+				//problem is that ret gets overwritten and will be the last processed vs, not the one that matched...hmm.
+
+				switch (bankSelect)
+				{
+				case 0:
+					//match to a pin member of servoslot and copy it over  
+					for (auto& vs : virtualservoCollection) {ret= localHelper(vs); }
+					break;
+
+				case 1:
+					for (auto& vs : virtualservoCollectionBank1) {ret = localHelper(vs); }
+					break;
+
+				case 2:
+					for (auto& vs : virtualservoCollectionBank2) {ret= localHelper(vs); }
+					break;
+				}
+
+				Serial.printf("dev %d\n", ret);
+
+				if (ret == DEVICE_MAS) {
+					Serial.println(F("Cannot use p command on MAS aspect"));
+					prompt();
+				}else if (ret == DEVICE_SENSOR) {
+					Serial.println(F("Cannot use p command on a sensor"));
+					prompt();
+				}
+				else {
+					prompt(true);
+				}
+			}
+			else
+			{
+				Serial.println("bad command. usage p pin,t|c|n|T,[power]");
+				prompt();
+			}
+
+		}
+
 
 
 		//EMULATE a dcc command.  This will affect all servos/aspects at a given dcc address
@@ -1556,6 +1696,8 @@ void checkSerial(void) {
 					Serial.print(vs.continuous, DEC);
 					Serial.print(F("  rate "));
 					Serial.print(vs.rate, DEC);
+					Serial.print(F("  state "));  //debug
+					Serial.print(vs.state, DEC); //debug
 					break;
 
 				case DEVICE_ASPECT:
@@ -2325,7 +2467,7 @@ void eeGetSettings(void) {
 	if (defaultController.softwareVersion != bootController.softwareVersion) {
 		/*need to re-initiatise eeprom with factory defaults*/
 		/*If software version has changed, we need to re-initiatise eeprom with factory defaults*/
-		Serial.println("restore factory defaults");
+		Serial.println(F("restore factory defaults"));
 		factory = true;
 		EEPROM.put(0, defaultController);
 		//eeAddr += sizeof(defaultController);
@@ -2378,6 +2520,7 @@ void eeGetSettings(void) {
 		Serial.print(F("\nsofware version "));
 		Serial.println(bootController.softwareVersion, DEC);
 		if (factory) Serial.println(F("factory reset"));
+		Serial.printf("CPU freq %d\n", esp_get_cpu_freq_mhz());
 
 }
 
@@ -2500,13 +2643,14 @@ void processServo(void) {
 
 			if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
 				vs.state = SERVO_CLOSED;
+				Serial.printf("nowC %d\n", vs.pin); //debug
 			}
 
 			ESPservoAttach(vs.pin, true);
 			break;
 
 		case SERVO_TO_THROWN:
-			//-ve roation rate values will slow down movement
+			//-ve rotation rate values will slow down movement
 			if (vs.timeDelay != 0) break;
 			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
 
@@ -2519,6 +2663,7 @@ void processServo(void) {
 			}
 
 			if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+				Serial.printf("nowT %d\n", vs.pin); //debug
 				vs.state = SERVO_THROWN;
 			}
 
@@ -2607,7 +2752,7 @@ void processServo(void) {
 			if (vsBoot == nullptr) {
 				//handle next-up servo to boot. servos are booted in the CLOSED position
 				//and aspects are booted with POWER=off
-				vsBoot = (VIRTUALSERVO*)&vs;
+				vsBoot =&vs;
 				bootTimer = 34;
 	
 				//refactor as switch.  vs and vsBoot are the same item
@@ -2657,7 +2802,7 @@ void processServo(void) {
 
 
 			}
-			else if (vsBoot == (VIRTUALSERVO*)&vs) {
+			else if (vsBoot == &vs) {
 				//This is the current boot-servo. Decrement bootTimer
 				bootTimer -= bootTimer > 0 ? 1 : 0;
 
@@ -2674,13 +2819,26 @@ void processServo(void) {
 		}
 
 		//update servo positions every 15ms
-		if (vs.deviceType==DEVICE_SERVO) ESPservoWrite(vs.pin, vs.position);
+#ifdef SYNC_PULSE
+		if (vs.deviceType == DEVICE_SERVO) {
+			if (vs.pin != 8) ESPservoWrite(vs.pin, vs.position);
+		}
+#else
+		if (vs.deviceType == DEVICE_SERVO) ESPservoWrite(vs.pin, vs.position);
+#endif // SYNC_PULSE
 
+
+		
 		
 	} //end of auto virtualServoCollection, aka BANK 0
 
-	
+
+#ifdef SYNC_PULSE
+	if (!bootController.hasPCA9685modules) { digitalWrite(NodeMCUmap[8], LOW); return; }
+#else
 	if (!bootController.hasPCA9685modules) return;
+#endif
+
 
 	for (uint8_t activeBank = 1;activeBank < 3;activeBank++) {
 	

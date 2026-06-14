@@ -125,8 +125,9 @@ static void IRAM_ATTR servo_handler(void) {
 	//1-8 we load up the servo specific pulse period
 	//if a servo is not attached, then we clear servoGPIOmask and we still need to load the pulse period
 	//to ensure we have another int and advance through all pins
+	
 
-	if (servoIndex < 8) {  //DEBUG return this to 9 when done debugging
+	if (servoIndex < 9) {  
 		if (servoPool[servoIndex].isAttached) {
 			servoGPIOmask = 1 << servoPool[servoIndex].gpioPin;
 			gpio->out_w1ts = servoGPIOmask;
@@ -175,7 +176,7 @@ void ESPservoInit() {
 /// <param name="position">0-180 degrees</param>
 void ESPservoWrite(uint8_t pin, uint8_t position) {
 	//find which index we are dealing with
-	if ((pin==0) ||(pin > 8)) return;
+	if ((pin==0) ||(pin > 8)) return;  
 	for (auto &s : servoPool) {
 		if (s.gpioPin == NodeMCUmap[pin]) {
 			//calculate new delay from position. 0.5ms = 156, 2.5mS = 781
