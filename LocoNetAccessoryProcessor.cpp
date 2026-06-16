@@ -2,7 +2,8 @@
 // 
 // 
 
-#define TRACE
+
+#define nTRACE
 
 #ifndef TRACE
 #define trace(traceCodeBlock) ;
@@ -48,8 +49,6 @@ void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, 
 		}
 		ptr = ptrNext;
 	}
-
-	
 
 	free(buffer);
 }
