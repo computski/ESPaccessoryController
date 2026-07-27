@@ -151,18 +151,29 @@ this <B1> opcode encodes current OUTPUT levels
 				addr++;  //DCC addresses start at 1, range 1-4096
 				
 					if (nsESPaccessory::getVerbose()) {
-						Serial.printf("sensor %d\n", addr);
+						Serial.printf("qry sensor %d\n", addr);
 					};
 
 				//call out to the hardware. Preempt a L=0 response
-					tokens[2] &= 0b01101111;  
-					tokens[2] += nsESPaccessory::pollSensor(addr) ? 0b10000 : 0;
+
+				//2026-07-26 hang on, we want to read the debounced reading, not the instantaneous reading
+				//and if no such sensor exists, do we return low or hi?	
+					sensorEvent(addr, nsESPaccessory::getSensorState(addr));
+					//sensorEvent queues a message in the buffer
+
+
+//					tokens[2] &= 0b01101111;  
+	//				tokens[2] += nsESPaccessory::pollSensor(addr) ? 0b10000 : 0;
 
 					//recalculate checksum
-					tokens[3] = 0xFF ^ tokens[2] ^ tokens[1] ^ tokens[0];
-					snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", tokens[0], tokens[1], tokens[2], tokens[3]);
-					nsESPaccessory::queueMessage(buf);
+		//			tokens[3] = 0xFF ^ tokens[2] ^ tokens[1] ^ tokens[0];
+			//		snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", tokens[0], tokens[1], tokens[2], tokens[3]);
+				//	nsESPaccessory::queueMessage(buf);
 					
+					//sensor event sends;
+					//snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+					//so actually, as soon as we have decoded the address, we can call sensorEvent with addr and state
+
 			}
 			return;
 			
@@ -291,9 +302,19 @@ this <B1> opcode encodes current OUTPUT levels
 */
 	uint8_t payload[4];
 	payload[0] = 0xB2;
-	payload[1] = address & 0x7F;
-	payload[2] = address >> 8;
-	payload[2] += event ? 0b01010000 : 0b01000000;
+	//payload[1] = address & 0x7F;
+	//payload[2] = address >> 8;
+	//payload[2] += event ? 0b01010000 : 0b01000000;
+	
+	if (nsESPaccessory::getVerbose()) {
+		Serial.printf("sensor event %d val %d\n", address,event);
+	};
+
+	address--; //DCC address space starts at 1, but its mapped to base zero for loconet transmissions
+	payload[1] = (address >> 1) & 0x7F;  //drop <0> by shifting right
+	payload[2] = (address >> 8); //use rshift 8 as we want address <15-8> in posn <7-0>
+	payload[2] += event ? 0b01010000 : 0b01000000;  //event maps to IN2<4>
+	payload[2] += (address & 0b1) << 5; //<0> of address maps to IN2<5>
 	payload[3] = 0xFF ^ payload[2] ^ payload[1] ^ payload[0];
 	
 	char buf[25];

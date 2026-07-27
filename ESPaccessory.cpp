@@ -1,5 +1,11 @@
 
 /*
+* 2027-07-27 bugs
+* boots, but only bank 0 through to pin 8.
+* Does not state the I2C is working.  That's because you need to set BE. by default I2C is disabled
+* You need to be able to program pin 9 as a sensor pin and give it a dcc address. also, if it is addr 0 default then it should not send messages
+* 
+* 
 * 
 * 2026-06-15 still to fix
 * 1. PCA when it boots it stays attached.  needs to follow the attach state. FIXED
@@ -88,7 +94,7 @@ D7 GPIO13
 D8 GPIO15 (WPD, boot fails if hi)
 
 Assuming you use active pull down sensors, then all pins bar D8 can host a sensor
-The A0 analog input could also host a sensor.
+The A0 analog input could also host a sensor, which we will map to D9.
 
 So BANK0 CAN HAVE 9 io pins, we will map them as 0 through 8 to mirror the nodemcu naming
 on the PCA9685 device it will be pins 0-15
@@ -99,6 +105,7 @@ on the PCA9685 device it will be pins 0-15
 #include "ESPservo.h"
 #include <stdint.h>
 #include <Wire.h>
+#include <ESP8266mDNS.h>
 #include <Adafruit_PWMServoDriver.h>
 //https://github.com/adafruit/Adafruit-PWM-Servo-Driver-Library/blob/master/examples/servo/servo.ino
 
@@ -127,7 +134,7 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260511;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260727;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.2\0";   //note the actual setting requires comma separators
@@ -188,8 +195,8 @@ static os_timer_t payloadTimer;
 
 
 //++++++++++++++++++++ TURNOUTS, SIGNALS AND SENSORS ++++++++++++++++++++++++++++++++++++++++++++++
-#define ESP_TOTAL_PINS 9
-#define ESP_BASE_PIN 0
+//#define ESP_TOTAL_PINS 9
+//#define ESP_BASE_PIN 0
 #define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
 #define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
 
@@ -244,8 +251,8 @@ struct VIRTUALSERVO {
 };
 
 
-//virtual servo objects, there are 9 in Bank 0 (the ESP12) and then 16 in each of Bank 1 and 2 which are PCA drivers
-VIRTUALSERVO virtualservoCollection[ESP_TOTAL_PINS];
+//virtual servo objects, there are 10 in Bank 0 (the ESP12, but we use pin 9 as a proxy for the A0 pin) and then 16 in each of Bank 1 and 2 which are PCA drivers
+VIRTUALSERVO virtualservoCollection[10];
 VIRTUALSERVO virtualservoCollectionBank1[16];
 VIRTUALSERVO virtualservoCollectionBank2[16];
 
@@ -286,8 +293,6 @@ static void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach);
 static void prompt(bool ok=false);
 
 bool verbose;
-
-
 
 bool nsESPaccessory::queueMessage(std::string s) {
 	if (s.empty()) return false;
@@ -385,18 +390,28 @@ void nsESPaccessory::ESPaccessorySetup() {
 		
 	}
 	
+	//2026-07-26 allow user to find device via http://ESP_ACC.local rather than using the assigned IP address
+	//note that browsing to ESP_ACC gives a connection refused error as we are not running a web server
+
+	if (!MDNS.begin("ESP_ACC")) {
+		Serial.println("Error setting up MDNS responder!");
+	}
+
+
 
 	//https://sub.nanona.fi/esp8266/hello-world.html
 	os_timer_setfn(&servoTimer, (os_timer_func_t*)processServo, NULL);
 	os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
 	
-
-
 }
 
 
 
 void nsESPaccessory::ESPaccessoryLoop() {
+	//2026-07-26 keep refreshing the MDNS
+	MDNS.update();
+
+
 	static unsigned long previousMillis;
 	static unsigned long interval;
 	unsigned long currentMillis = millis();
@@ -1808,7 +1823,8 @@ void checkSerial(void) {
 	/// <returns>true if valid</returns>
 bool validatePin(int p) {
 	if (bankSelect == 0) {
-		if ((p < ESP_BASE_PIN) || (p >= ESP_BASE_PIN + ESP_TOTAL_PINS)) {
+		if ((p < 0) || (p >= 9)) {
+			//valid pins are 0-8, pin 9 is virtual and cannot be reprogrammed, it always returns as bad pin
 			Serial.printf("bad pin %d\n", p);
 			return false;
 		}
@@ -2132,18 +2148,38 @@ void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {
 	}
 }
 
-
+/* not required
 bool nsESPaccessory::pollSensor(int16_t addr) {
 	for (auto vs : virtualservoCollection) {
 		if (vs.address != addr) continue;
-		if (vs.deviceType != DEVICE_SENSOR) continue;
-		return digitalRead(NodeMCUmap[vs.pin]);
+		if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) continue;
+		if (vs.pin == 9) {
+			//pin 9 is a virtual pin, it reads the analog sensor and declares anything>1 volt as a high
+			return analogRead(A0) > 340 ? true : false;
+		}
+		else
+		{
+			return digitalRead(NodeMCUmap[vs.pin]);
+		}
 	}
 	
 	return true; 
 }
+*/
 
-
+/// <summary>
+/// read debounced state of sensor
+/// </summary>
+/// <param name="addr">dcc address of sensor</param>
+/// <returns>true (hi) by default, low if device exists and is low</returns>
+bool nsESPaccessory::getSensorState(int16_t addr) {
+	for (auto vs : virtualservoCollection) {
+		if (vs.address != addr) continue;
+		if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) continue;
+		return vs.state == SENSOR_LOW ? false : true;
+	}
+	return true;
+}
 
 
 
@@ -2180,6 +2216,10 @@ void setVirtualServoDefaults(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAban
 		vs.power = false;
 		vs.ignorePowerParameter = true;
 		vs.deviceType = DEVICE_SERVO;
+		//2026-07-27 special case for virtual pin 9 of the ESP servo array, set this as a sensor
+		if ((!isPCAbank) && (p==9)) {
+			vs.deviceType = DEVICE_SENSOR;
+		}
 		vs.rate = 0;
 		memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
 	}
@@ -2318,7 +2358,6 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 /// </summary>
 void eeGetSettings(void) {
 	CONTROLLER defaultController;  //grab defaults
-	//EEPROM.begin(1024);  //ESP does not have dedicated eeprom and must be allocated from Flash
 	EEPROM.begin(2200);  //ESP does not have dedicated eeprom and must be allocated from Flash.  Need 2200 for 3 banks
 	int eeAddr = 0;
 	bool factory = false;
@@ -2334,7 +2373,7 @@ void eeGetSettings(void) {
 
 		//set defaults for all virtual servo groups
 
-		setVirtualServoDefaults(virtualservoCollection, ESP_TOTAL_PINS, false);
+		setVirtualServoDefaults(virtualservoCollection, 10, false);
 		setVirtualServoDefaults(virtualservoCollectionBank1, 16, true);
 		setVirtualServoDefaults(virtualservoCollectionBank2, 16, true);
 
@@ -2368,7 +2407,7 @@ void eeGetSettings(void) {
 
 		//initialise the pin assignments move all servos and aspects to closed position
 				
-		bootVirtualServo(virtualservoCollection, ESP_TOTAL_PINS,false);
+		bootVirtualServo(virtualservoCollection, 10,false);
 		bootVirtualServo(virtualservoCollectionBank1, 16, true);
 		bootVirtualServo(virtualservoCollectionBank2, 16, true);
 			
@@ -2466,9 +2505,9 @@ void processServo(void) {
 	for (auto& vs : virtualservoCollection) {
 
 #ifdef  SYNC_PULSE
-		if (vs.pin > 7) continue;
+		if (vs.pin == 7) continue;
 #else
-		if (vs.pin >= ESP_TOTAL_PINS) continue;  //ignore invalid pins
+		if (vs.pin >= 10) continue;  //ignore invalid pins
 #endif 
 		
 
@@ -2575,8 +2614,14 @@ void processServo(void) {
 			//and this in turn is used to debounce the input 8 zeros or 1s must be seen
 			if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) break;
 			vs.position = vs.position << 1;
-			vs.position += digitalRead(gpioPin);  
+			if (vs.pin == 9) {
+				//virtual pin 9 is actually the analog port where >1 volt is a high
+				vs.position += analogRead(A0) > 340 ? 1 : 0;
+			}
+			else
+			{ vs.position += digitalRead(gpioPin); }
 			
+						
 
 			//2026-04-21 found the sensor bug.  If you queue a TCP message before you are connected then this caused a crash
 			//this is now fixed in sendEnqueueMessages().  No need to suspend &servoTimer
@@ -2616,6 +2661,15 @@ void processServo(void) {
 				switch (vs.deviceType) {
 				case DEVICE_SENSOR:
 				case DEVICE_SENSOR_WPU:
+					//special case pin 9 which is a proxy for A0
+					if (vs.pin == 9) {
+						vs.position = 0xFF;  //spoof a high input state
+						vs.state = SENSOR_HIGH;
+						vsBoot = nullptr;
+						bootTimer = 0;
+						break;
+					}
+
 					ESPservoAttach(vs.pin, false);
 					if  (vs.deviceType== DEVICE_SENSOR_WPU)
 					{ pinMode(gpioPin,INPUT_PULLUP); }
