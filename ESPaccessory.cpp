@@ -1,5 +1,9 @@
 
 /*
+* 2026-08-08 bug. if you change SSID it fails to connect.  i think its adding unwanted chars...
+* its prob capturing a CRLF char on end that we don't want and we also need to skip thro the leading spaces
+* 
+* 
 * 2027-07-27 bugs
 * boots, but only bank 0 through to pin 8.
 * Does not state the I2C is working.  That's because you need to set BE. by default I2C is disabled
@@ -134,18 +138,19 @@ using namespace nsESPaccessory;
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
 struct CONTROLLER
 {
-	long softwareVersion = 20260727;  //yyyymmdd captured as an integer
+	long softwareVersion = 20260807;  //yyyymmdd captured as an integer
 	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
 	char AP_IP[17] = "192.168.6.2\0";   //note the actual setting requires comma separators
 	char STA_SSID[21] = "Ossonet\0";  //SSID when running as a station on an external WiFi network
 	char STA_pwd[21] = "11223344AA\0";			//pwd for station
-	char tcpIP[17] = "192.168.1.118\0";   //target IP of CONTROLLER to connect to
+	char tcpIP[17] = "192.168.1.121\0";   //target IP of CONTROLLER to connect to
 	uint16_t tcpPort = 1234;       //tcp port
 	char Mode = 'S';  //C denotes client, S server and L as standalone wifi server
 	bool hasPCA9685modules = false; //denotes PCA modules are present
 	uint16_t PCAservoMin = 150;
 	uint16_t PCAservoMax = 600;
+	char MDNS[17] = "ESP_ACC\0";  //mDNS name
 	bool isDirty = false;  //will be true if EEPROM needs to be written
 };
 
@@ -393,7 +398,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 	//2026-07-26 allow user to find device via http://ESP_ACC.local rather than using the assigned IP address
 	//note that browsing to ESP_ACC gives a connection refused error as we are not running a web server
 
-	if (!MDNS.begin("ESP_ACC")) {
+	if (!MDNS.begin(bootController.MDNS)) {
 		Serial.println("Error setting up MDNS responder!");
 	}
 
@@ -671,12 +676,20 @@ void checkSerial(void) {
 	char SerialBuffer[64];
 	Serial.readString().toCharArray(SerialBuffer, 64);
 
-	//Note: its a quirk of readString but ParseBracketedParameters won't work with the SerialBuffer reliably
+		//Note: its a quirk of readString but ParseBracketedParameters won't work with the SerialBuffer reliably
 	//need to fix this in ParseBracketedParameters itself. DONE.
 
 	//need a temporary virtualservo object to parse new values into
 	VIRTUALSERVO vsParse;
 	uint8_t i = 0;
+	//remove any trailling cr lf characters
+	for (i == 0;i < sizeof(SerialBuffer);i++) {
+		if (SerialBuffer[i] == '\n') { SerialBuffer[i] = '\0'; }
+		if (SerialBuffer[i] == '\r') { SerialBuffer[i] = '\0'; }
+	}
+	i = 0;
+
+
 	char* pch;
 
 
@@ -783,6 +796,7 @@ void checkSerial(void) {
 			Serial.printf("\nSoftware ver %d\n", bootController.softwareVersion);
 			Serial.print("MAC ");
 			Serial.println(WiFi.macAddress());  // %s in printf does not work
+			Serial.printf("mDNS name %s\n", bootController.MDNS);
 
 			switch (bootController.Mode) {
 			case 'S':
@@ -808,15 +822,33 @@ void checkSerial(void) {
 			prompt();
 			Serial.printf("PCA min %d\n", bootController.PCAservoMin);
 			Serial.printf("PCA max %d\n", bootController.PCAservoMax);
+
 		}
+
+		if (SerialBuffer[0] == 'G') {
+		//set mDNS name
+			i = 0;
+			char buffer[20];  //full of nulls
+			while (SerialBuffer[++i] == ' ') {}; //ignore leading spaces
+			strncpy(buffer, SerialBuffer + i, sizeof(bootController.MDNS));
+			memset(bootController.STA_SSID, '\0', sizeof(bootController.MDNS));
+			strncpy(bootController.STA_SSID, buffer, sizeof(bootController.MDNS));
+			Serial.printf("mDNS name set to %s\n", bootController.MDNS);
+			Serial.println(F("Now you must REBOOT\n\n"));
+			bootController.isDirty = true;
+			eePutSettings();
+		}
+
 
 		if (SerialBuffer[0] == 'S') {
 			//set Station SSID
+			i = 0;
 			char buffer[20];  //full of nulls
-			strncpy(buffer, SerialBuffer + 1, 19);
+			while (SerialBuffer[++i] == ' ') {}; //ignore leading spaces
+			strncpy(buffer, SerialBuffer + i , 19);
 			memset(bootController.STA_SSID, '\0', sizeof(bootController.STA_SSID));
 			strncpy(bootController.STA_SSID, buffer, sizeof(bootController.STA_SSID));
-			Serial.printf("STA SSID set to %s\n", buffer);
+			Serial.printf("STA SSID set to %s\n", bootController.STA_SSID);
 			Serial.println(F("Now you must REBOOT\n\n"));
 			bootController.isDirty = true;
 			eePutSettings();
@@ -824,8 +856,10 @@ void checkSerial(void) {
 
 		if (SerialBuffer[0] == 'W') {
 			//set Station SSID
+			i = 0;
 			char buffer[21];  //full of nulls
-			strncpy(buffer, SerialBuffer + 1, 20);  //max ssid or pwd is 20 char
+			while (SerialBuffer[++i] == ' ') {}; //ignore leading spaces
+			strncpy(buffer, SerialBuffer+i, 20);  //max ssid or pwd is 20 char
 			//if keyword none is given, wipe the pwd
 			if (strcmp(buffer, "none") == 0) { memset(bootController.STA_pwd, '\0', sizeof(bootController.STA_pwd)); }
 			else {
@@ -833,7 +867,7 @@ void checkSerial(void) {
 				strncpy(bootController.STA_pwd, buffer, sizeof(bootController.STA_pwd));
 			}
 
-			Serial.printf("STA password set to %s\n", buffer);
+			Serial.printf("STA password set to %s\n", bootController.STA_pwd);
 			Serial.println(F("Password must be min 8 chars"));
 			Serial.println(F("Now you must REBOOT\n\n"));
 			bootController.isDirty = true;
@@ -846,6 +880,7 @@ void checkSerial(void) {
 			Serial.println(F("W=set SSID pwd"));
 			Serial.println(F("T=set TCP server IP"));
 			Serial.println(F("P=set TCP server port"));
+			Serial.println(F("G=set mDNS name"));
 			Serial.println(F("M=LocoNet mode"));
 			Serial.println(F("V=toggle verbose"));
 			Serial.println(F("X=dump WIFI params\n"));
@@ -953,6 +988,9 @@ void checkSerial(void) {
 				if (!resolved) break;
 			}
 
+			//bank 0 virtual pin 9 can only be a sensor
+			if ((bankSelect == 0) && (vsParse.pin == 9)) resolved = false;
+
 			if (((i == 4) || (i == 5)) && resolved) {
 				vsParse.deviceType = DEVICE_ASPECT;
 				vsParse.state = ASPECT_CLOSED;
@@ -1043,6 +1081,9 @@ void checkSerial(void) {
 				pch = strtok(NULL, " ,");
 				if (!resolved) break;
 			}
+
+			//special case for bank 0 pin 9 which can only be a sensor
+			if ((bankSelect == 0) && (vsParse.pin == 9)) resolved = false;
 
 			if (resolved && ((i == 6) || (i == 5))) {
 				//[continuous] is optional, accept 5 || 6
@@ -1371,7 +1412,6 @@ void checkSerial(void) {
 		//SENSOR command. sets up a sensor on a given pin, by default will be WPU a zero param is given
 		//some pins have pulldowns on the board and the WPU may not be enough to overcome these.
 		//usage k pin address [wpu]
-		//To do 2026-05-30 this command can only work on bank 0
 		if (SerialBuffer[0] == 'k') {
 			if (bankSelect != 0) {
 				Serial.println(F("Sensors only supported on bank 0"));
@@ -1390,8 +1430,9 @@ void checkSerial(void) {
 				vsParse.ignorePowerParameter = true;
 				vsParse.continuous = false;
 				vsParse.position = 0;
+				//force sensor to initialse
 				vsParse.state = SERVO_BOOT;
-
+				
 				while (pch != NULL) {
 					switch (i++) {
 					case 1:
@@ -1479,6 +1520,7 @@ void checkSerial(void) {
 					if (vs.pin != pin) return;
 					if (vs.deviceType != DEVICE_SERVO)  return;
 					vs.rate = rate;
+					vs.timeDelay = 0;
 					bootController.isDirty = true;
 					return;
 					};
@@ -1766,6 +1808,9 @@ void checkSerial(void) {
 
 			if (i < 8) resolved = false;
 
+			//bank0 pin9 can only be a sensor
+			if ((bankSelect == 0) && (vsParse.pin == 9)) resolved = false;
+
 			//next we expect [a b c] where a b c can be [] through to 8 sets of digits
 			if (resolved) {
 				//all params were captured into vsParse
@@ -1823,8 +1868,8 @@ void checkSerial(void) {
 	/// <returns>true if valid</returns>
 bool validatePin(int p) {
 	if (bankSelect == 0) {
-		if ((p < 0) || (p >= 9)) {
-			//valid pins are 0-8, pin 9 is virtual and cannot be reprogrammed, it always returns as bad pin
+		if ((p < 0) || (p >= 10)) {
+			//valid pins are 0-9, pin 9 is virtual on bank 0
 			Serial.printf("bad pin %d\n", p);
 			return false;
 		}
@@ -2148,37 +2193,19 @@ void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {
 	}
 }
 
-/* not required
-bool nsESPaccessory::pollSensor(int16_t addr) {
-	for (auto vs : virtualservoCollection) {
-		if (vs.address != addr) continue;
-		if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) continue;
-		if (vs.pin == 9) {
-			//pin 9 is a virtual pin, it reads the analog sensor and declares anything>1 volt as a high
-			return analogRead(A0) > 340 ? true : false;
-		}
-		else
-		{
-			return digitalRead(NodeMCUmap[vs.pin]);
-		}
-	}
-	
-	return true; 
-}
-*/
 
 /// <summary>
 /// read debounced state of sensor
 /// </summary>
 /// <param name="addr">dcc address of sensor</param>
-/// <returns>true (hi) by default, low if device exists and is low</returns>
-bool nsESPaccessory::getSensorState(int16_t addr) {
+/// <returns>-1 if device not exists, and literal 1:0 state if device does exist</returns>
+int8_t nsESPaccessory::getSensorState(int16_t addr) {
 	for (auto vs : virtualservoCollection) {
 		if (vs.address != addr) continue;
 		if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) continue;
 		return vs.state == SENSOR_LOW ? false : true;
 	}
-	return true;
+	return -1;
 }
 
 
@@ -2229,30 +2256,6 @@ void setVirtualServoDefaults(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAban
 }
 
 
-/*
-void setVirtualServoDefaults(VIRTUALSERVO(*ptrToVSC)[16], uint8_t pinCount, bool isPCAbank) {
-	uint8_t p = 0;
-	for (auto& vs : *ptrToVSC) {
-		vs.pin = p++;
-		vs.invert = 0;
-		vs.position = 90;
-		vs.swing = 25;
-		vs.continuous = 0;
-		vs.state = SERVO_BOOT;
-		vs.power = true;
-		vs.ignorePowerParameter = true;
-		vs.deviceType = DEVICE_SERVO;
-		vs.rate = 0;
-		memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
-	}
-}
-*/
-
-
-
-
-
-
 
 
 
@@ -2267,6 +2270,7 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 		auto& vs=vsc[p];  //we need to modify vsc, not modify a copy of the element!
 		vs.pin = p;
 		vs.state = SERVO_BOOT;
+		vs.timeDelay = 0;
 		vs.MASstate = 127;
 		//vs.position = 90;  //neutral
 		/*minimum useful swing is 5 degrees*/
@@ -2370,14 +2374,12 @@ void eeGetSettings(void) {
 		EEPROM.put(0, defaultController);
 		//eeAddr += sizeof(defaultController);
 		eeAddr = EEOFFSET; //bug fix
-
+		
 		//set defaults for all virtual servo groups
-
 		setVirtualServoDefaults(virtualservoCollection, 10, false);
 		setVirtualServoDefaults(virtualservoCollectionBank1, 16, true);
 		setVirtualServoDefaults(virtualservoCollectionBank2, 16, true);
 
-		
 		/*write back default values*/
 		EEPROM.put(eeAddr, virtualservoCollection);
 		eeAddr += sizeof(virtualservoCollection);
@@ -2480,7 +2482,7 @@ bool nsESPaccessory::getVerbose(void) {
 /// <summary>
 /// PROCESS SERVO POSITIONS AND SIGNAL ASPECTS.  Call every 15mS from a timer.
 /// </summary>
-void processServo(void) {
+void processServoOLD(void) {
 	static VIRTUALSERVO* vsBoot = nullptr;
 	static uint8_t bootTimer = 0;
 	static uint8_t tick;
@@ -2528,7 +2530,8 @@ void processServo(void) {
 
 		case SERVO_TO_CLOSED:
 			//-ve rotation rate values will slow down movement
-			if (vs.timeDelay != 0) break;
+			//break on negative values. zero and positive will reset timeDelay (positive vals are edge case errors)
+			if (vs.timeDelay < 0) break;
 			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
 
 			//swing toward minPosition, unless invert is true
@@ -2548,7 +2551,7 @@ void processServo(void) {
 
 		case SERVO_TO_THROWN:
 			//-ve rotation rate values will slow down movement
-			if (vs.timeDelay != 0) break;
+			if (vs.timeDelay < 0) break;
 			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
 
 			//swing toward maxPosition unless invert is true
@@ -2615,7 +2618,7 @@ void processServo(void) {
 			if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) break;
 			vs.position = vs.position << 1;
 			if (vs.pin == 9) {
-				//virtual pin 9 is actually the analog port where >1 volt is a high
+				//virtual pin 9 is actually the A0 analog port where >1 volt is interpreted as high
 				vs.position += analogRead(A0) > 340 ? 1 : 0;
 			}
 			else
@@ -2689,7 +2692,7 @@ void processServo(void) {
 						bootTimer = 0;
 						//break;
 					}
-
+					vs.timeDelay = 0;
 					vs.position = vs.invert ? maxPosition : minPosition;
 					ESPservoAttach(vs.pin, true);
 					ESPservoWrite(vs.pin, vs.position);
@@ -2776,6 +2779,7 @@ void processServo(void) {
 					//refactor as switch.  vs and vsBoot are the same item
 					switch (vs.deviceType) {
 					case DEVICE_SERVO:
+						vs.timeDelay = 0;
 						vs.position = vs.invert ? maxPosition : minPosition;  //means we boot at 0 or 180 even though we might normally operate at say 90+-10....
 						//attaches the driver and commands to a specific position immediately
 						PCAservoWrite(&vs, activeBank,true);
@@ -2817,7 +2821,8 @@ void processServo(void) {
 
 			case SERVO_TO_CLOSED:
 				//-ve rotation rate values will slow down movement
-				if (vs.timeDelay != 0) break;
+				//reset timeDelay once value is zero or positive (positive is an error edge case)
+				if (vs.timeDelay < 0) break;
 				vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
 
 				//swing toward minPosition, unless invert is true
@@ -2840,7 +2845,7 @@ void processServo(void) {
 
 			case SERVO_TO_THROWN:
 				//-ve roation rate values will slow down movement
-				if (vs.timeDelay != 0) break;
+				if (vs.timeDelay < 0) break;
 				vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
 
 				//swing toward maxPosition unless invert is true
@@ -2917,12 +2922,12 @@ void processServo(void) {
 			//need an I2C write to the PCA hardware.
 						
 			
-			//2026-05-24 re-introduce for process-time test. 
+			//2026-05-24 re-introduce for debug process-time test. 
 			//if (vs.deviceType == DEVICE_SERVO) PCAservoWrite(&vs, activeBank,true);
 
 		}
 
-	}//for loop
+	} //for loop
 
 #ifdef SYNC_PULSE
 	digitalWrite(NodeMCUmap[8], LOW);  
@@ -2942,20 +2947,372 @@ void processServo(void) {
 
 
 	*/
-}
+
+
+}//end function
+
+/// <summary>
+/// PROCESS SERVO POSITIONS AND SIGNAL ASPECTS.  Call every 15mS from a timer.
+/// </summary>
+void processServo(void) {
+	static VIRTUALSERVO* vsBoot = nullptr;
+	static uint8_t bootTimer = 0;
+	static uint8_t tick;
+
+#ifdef SYNC_PULSE
+	digitalWrite(NodeMCUmap[8], HIGH);
+#endif
+
+	if (tick++ > 33) {
+		//0.5sec counter used to toggle MAS leds and also sync to the edge
+		tick = 0;
+		MAScommandSync = true;
+		MASledState = !MASledState;
+	}
+
+	
+	/*2026-05-24 note on speed tests.  With 160MHz clock, this entire routine executes within 160uS, or at most 1mS when I2C commands are issued to a servo
+	this is well within a 15mS repeat call period.  My concerns that the floating point math might take too long are not bourne out.
+	It is possible, I suppose, that if all PCA servos were commanded to move at once then  we might exceed the 15mS repeat-call interval.
+
+
+	with two full PCAbanks, and continuous calls to update each PWM pin (32 of) over I2C @ 400KHz, the routine takes 6.83mS
+	we can reduce this by means of a change flag, as PWM only needs to be written if there is a change. The PCA hardware itself will keep transmitting
+	the same PWM independent of further I2C instructions.
+
+	refactor: at the point we are about to set SERVO_THROWN|CLOSED we check whether we want continuous or not.  if no, then set pwm to zero
+	if yes, then do nothing, as the PCA will continue with the last PWM setting.
+	then in SERVO_THROWN|CLOSED itself, we do nothing.
+
+
+	*/
+
+
+	
+	auto servoHelper = [](VIRTUALSERVO& vs,int8_t activeBank) {
+
+		//exit if pin not valid
+		if (activeBank==0) {
+#ifdef  SYNC_PULSE		
+			if (vs.pin == 7) return;
+#endif 		
+			if (vs.pin >= 10) return;
+		}
+		else {
+			if (vs.pin >= 16) return;
+		}
+
+
+		uint8_t maxPosition = vs.swing + 90;
+		uint8_t minPosition = 90 - vs.swing;
+		//gpioPin is required for bank 0 only, but for code safety ensure it is always populated
+		uint8_t gpioPin = activeBank==0? NodeMCUmap[vs.pin]: NodeMCUmap[0];
+
+
+		//Servo rotation rates. +ve rate values will speed up movement by increasing the movement increment above 1			
+		uint8_t increment = vs.rate > 0 ? vs.rate : 1;
+		//.timeDelay is used for -ve rate values			
+		vs.timeDelay += vs.timeDelay < 0 ? 1 : 0;
+
+		switch (vs.state) {
+		case SERVO_NEUTRAL:
+			vs.position = 90;
+			if (activeBank==0) {ESPservoAttach(vs.pin, true);}
+			else { PCAservoWrite(&vs, activeBank, true);}
+			break;
+
+		case SERVO_TO_CLOSED:
+			//-ve rotation rate values will slow down movement		
+			//break on negative values. zero and positive will reset timeDelay (positive vals are edge case errors)		
+			if (vs.timeDelay < 0) break;
+			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
+
+			//swing toward minPosition, unless invert is true		
+			if (vs.invert) {
+				vs.position += vs.position < maxPosition ? increment : 0;
+			}
+			else {
+				vs.position -= vs.position > minPosition ? increment : 0;
+			}
+
+			if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+				vs.state = SERVO_CLOSED;
+			}
+
+			if (activeBank == 0) { ESPservoAttach(vs.pin, true); }
+			else { PCAservoWrite(&vs, activeBank, true); }
+			break;
+
+		case SERVO_TO_THROWN:
+			//-ve rotation rate values will slow down movement		
+			if (vs.timeDelay < 0) break;
+			vs.timeDelay = vs.rate < 0 ? vs.rate : 0;
+
+			//swing toward maxPosition unless invert is true		
+			if (vs.invert) {
+				vs.position -= vs.position > minPosition ? increment : 0;
+			}
+			else {
+				vs.position += vs.position < maxPosition ? increment : 0;
+			}
+
+			if ((vs.position >= maxPosition) || (vs.position <= minPosition)) {
+				vs.state = SERVO_THROWN;
+			}
+
+			if (activeBank == 0) { ESPservoAttach(vs.pin, true); }
+			else { PCAservoWrite(&vs, activeBank, true); }
+			break;
+
+		case SERVO_THROWN:
+			vs.position = vs.invert ? minPosition : maxPosition;
+			if (activeBank != 0) break;  //PCA banks; do nothing. PWM will continue to send per last instruction if required, else it was instructed to detach
+			if (!vs.continuous) ESPservoAttach(vs.pin, false);
+			break;
+
+		case SERVO_CLOSED:
+			vs.position = vs.invert ? maxPosition : minPosition;
+			if (activeBank != 0) break;  //PCA banks; do nothing.
+			if (!vs.continuous) ESPservoAttach(vs.pin, false);
+			break;
+
+		case ASPECT_CLOSED:
+			switch (activeBank) {
+
+			case 0:
+				if ((vs.power) || (vs.ignorePowerParameter)) {
+					//actively drive the pin. Thrown is a high state unless invert is active	
+					pinMode(gpioPin, OUTPUT);
+					digitalWrite(gpioPin, vs.invert ? HIGH : LOW);
+				}
+				else {
+					//pin to tri-state	
+					pinMode(gpioPin, INPUT);
+				}
+				break;
+			case 1:
+				PCAbank1.setPin(vs.pin, 0, vs.invert);
+				break;
+
+			case 2:
+				PCAbank2.setPin(vs.pin, 0, vs.invert);
+				break;
+			}
+			break;
+
+		case ASPECT_THROWN:
+			switch (activeBank) {
+			case 0:
+				if ((vs.power) || (vs.ignorePowerParameter)) {
+					//actively drive the pin. Thrown is a high state unless invert is active	
+					pinMode(gpioPin, OUTPUT);
+					digitalWrite(gpioPin, vs.invert ? LOW : HIGH);
+				}
+				else {
+					//pin to tri-state	
+					pinMode(gpioPin, INPUT);
+				}
+				break;
+			case 1:
+				//PCA devices do not support tri state, so the vs.power parameter is to be ignored.  We have to drive active high or low
+				//strictly we don't need to keep updating .setPWM but we'd need a flag to keep track of at least one write
+				PCAbank1.setPin(vs.pin, 4095, vs.invert);
+				break;
+
+			case 2:
+				PCAbank1.setPin(vs.pin, 4095, vs.invert);
+				break;
+			}
+			break;
+
+
+		case ASPECT_MULTIPLE:
+			// MAScommandSync is set by an LEDstate edge, thus synchronising all changes with the master LED clock.		
+			// this prevents short-duration flashses when changing to one of the MAS flashing aspects		
+			if (MAScommandSync) assertMASoutput(vs, activeBank);
+			break;
+
+
+		case SENSOR_HIGH:
+		case SENSOR_LOW:
+			//sensors are not supported on PCA banks
+			if (activeBank != 0) break;
+			//for sensors we repurpose the position parameter to record the input state every 15ms		
+			//and this in turn is used to debounce the input 8 zeros or 1s must be seen		
+			if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) break;
+			vs.position = vs.position << 1;
+			if (vs.pin == 9) {
+				//virtual pin 9 is actually the A0 analog port where >1 volt is interpreted as high	
+				vs.position += analogRead(A0) > 340 ? 1 : 0;
+			}
+			else
+			{
+				vs.position += digitalRead(gpioPin);
+			}
+
+			//2026-04-21 found the sensor bug.  If you queue a TCP message before you are connected then this caused a crash		
+			//this is now fixed in sendEnqueueMessages().  No need to suspend &servoTimer		
+			if ((vs.state == SENSOR_HIGH) && (vs.position == 0)) {
+				//declare low
+				nsLOCONETaccessoryProcessor::sensorEvent(vs.address, false);
+				vs.state = SENSOR_LOW;
+			}
+
+			if ((vs.state == SENSOR_LOW) && (vs.position == 0xFF)) {
+				nsLOCONETaccessoryProcessor::sensorEvent(vs.address, true);
+				vs.state = SENSOR_HIGH;
+			}
+			break;
+
+		case HEARTBEAT_HIGH:
+			//convention is heartbeatLEDstate is activelow		
+			if (activeBank != 0) break;
+			if (heartbeatLEDstate) break;
+			digitalWrite(gpioPin, HIGH);
+			vs.state = HEARTBEAT_LOW;
+			break;
+		case HEARTBEAT_LOW:
+			if (activeBank != 0) break;
+			if (!heartbeatLEDstate) break;
+			digitalWrite(gpioPin, LOW);
+			vs.state = HEARTBEAT_HIGH;
+			break;
+
+			//about to go to dinner... yet to PCA this
+		case SERVO_BOOT:
+			if (vsBoot == nullptr) {
+				//handle next-up servo to boot. servos are booted in the CLOSED position	
+				//and aspects are booted with POWER=off	
+				vsBoot = &vs;
+				bootTimer = 34;
+
+				//vs and vsBoot are the same item	
+				switch (vs.deviceType) {
+				case DEVICE_SENSOR:
+				case DEVICE_SENSOR_WPU:
+					if (activeBank != 0) {
+						vsBoot = nullptr;
+						bootTimer = 0;
+						break;
+					}
+					//special case pin 9 which is a proxy for A0
+					if (vs.pin == 9) {
+						vs.position = 0xFF;  //spoof a high input state
+						vs.state = SENSOR_HIGH;
+						vsBoot = nullptr;
+						bootTimer = 0;
+						break;
+					}
+
+					ESPservoAttach(vs.pin, false);
+					if (vs.deviceType == DEVICE_SENSOR_WPU)
+					{
+						pinMode(gpioPin, INPUT_PULLUP);
+					}
+					else { pinMode(gpioPin, INPUT); }
+					vs.position = 0xFF;  //spoof a high input state
+					vs.state = SENSOR_HIGH;
+					vsBoot = nullptr;
+					bootTimer = 0;
+					break;
+
+				case DEVICE_SERVO:
+					//special case for pin0. This cannot operate as a servo so instead make it a heartbeat indicator
+					if (vs.pin == 0) {
+						vs.state = HEARTBEAT_HIGH;   //DEBUG DISABLE
+						pinMode(gpioPin, OUTPUT);
+						vsBoot = nullptr;
+						bootTimer = 0;
+						//break;
+					}
+					vs.timeDelay = 0;
+					vs.position = vs.invert ? maxPosition : minPosition;
+					if (activeBank == 0) {
+						ESPservoAttach(vs.pin, true);
+						ESPservoWrite(vs.pin, vs.position);
+					}
+					else {
+						PCAservoWrite(&vs, activeBank, true);
+					}
+					break;
+
+				case DEVICE_MAS:
+					vs.MASstate = 127;
+					//roll into DEVICE_ASPECT
+				case DEVICE_ASPECT:
+					vs.power = false;
+					vs.state = vs.deviceType == DEVICE_MAS ? ASPECT_MULTIPLE : ASPECT_CLOSED;
+					vsBoot = nullptr;
+					bootTimer = 0;
+					if (activeBank==0) ESPservoAttach(vs.pin, false);
+					break;
+				case DEVICE_I2C:
+					vsBoot = nullptr;
+					bootTimer = 0;
+					break;
+
+				}
+
+
+			}
+			else if (vsBoot == &vs) {
+				//This is the current boot-servo. Decrement bootTimer	
+				bootTimer -= bootTimer > 0 ? 1 : 0;
+				//timed out?	
+				if (bootTimer == 0) {
+					vs.state = SERVO_CLOSED;
+					//detach if !vs.continuous
+					if (activeBank!=0) PCAservoWrite(&vs, activeBank, vs.continuous);
+					Serial.print(F("pin booted "));
+					Serial.println(vs.pin, DEC);
+					//release for next vs to boot
+					vsBoot = nullptr;
+				}
+			}
+			break;
+		}
+
+		//update servo positions every 15ms. This is only required on bank 0
+		//bank 1 and 2, continually transmit servo position data and are updated in the lambda function	
+		//using calls to PCAservoWrite()		
+
+		if (activeBank != 0) return;
+#ifdef SYNC_PULSE		
+		if (vs.deviceType == DEVICE_SERVO) {
+			if (vs.pin != 8) ESPservoWrite(vs.pin, vs.position);
+		}
+#else		
+		if (vs.deviceType == DEVICE_SERVO) ESPservoWrite(vs.pin, vs.position);
+#endif // SYNC_PULSE		
+
+
+		};  //end lambda
 
 
 
 
+	for (auto& vs : virtualservoCollection) { servoHelper(vs, 0); }
+	for (auto& vs : virtualservoCollectionBank1) { servoHelper(vs, 1); }
+	for (auto& vs : virtualservoCollectionBank2) { servoHelper(vs, 2); }
 
 
-/*PCA notes
-PCAbank1.setPWM(vs.pin, whenOn, whenOff);  whenOn is usually 0, whenOff is when 0-4096 that output goes low
-if both are zero then presumably there is no high pulse
+#ifdef SYNC_PULSE
+		digitalWrite(NodeMCUmap[8], LOW);
+#endif
 
-PCAbank1.setPin(pin, pulse value, invert);  pulse value is 0-4096 where 0 is completely OFF unless invert is true
-PCAbank1.setOutputMode(totem);  true for totem outputs, false for open drain. this is global and all outputs will be of same type.
 
+
+}//end function
+
+
+
+/*
+//PCA notes
+//PCAbank1.setPWM(vs.pin, whenOn, whenOff);  whenOn is usually 0, whenOff is when 0-4096 that output goes low
+//if both are zero then presumably there is no high pulse
+//
+//PCAbank1.setPin(pin, pulse value, invert);  pulse value is 0-4096 where 0 is completely OFF unless invert is true
+//PCAbank1.setOutputMode(totem);  true for totem outputs, false for open drain. this is global and all outputs will be of same type.
 */
 
 
