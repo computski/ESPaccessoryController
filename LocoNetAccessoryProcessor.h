@@ -50,8 +50,7 @@
 namespace nsLOCONETaccessoryProcessor {
 	void handleLocoNet(void* arg, AsyncClient* client, void* data, size_t len);
 	void tokenProcessor(char* msg, AsyncClient* client);
-	void sensorEvent(uint16_t address, bool event);
-	bool pollSensor(int16_t addr); 
+	void sensorEvent(uint16_t address, int8_t event);
 	void commandTurnout(int16_t addr, bool thrown);
 	void commandMAS(int16_t addr, uint8_t state);
 

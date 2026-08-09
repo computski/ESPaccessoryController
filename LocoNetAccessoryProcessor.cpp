@@ -155,24 +155,27 @@ this <B1> opcode encodes current OUTPUT levels
 					};
 
 				//call out to the hardware. Preempt a L=0 response
+					//2026-08-09 rethink. if in client mode we need to respond to RECEIVE messages, then
+					//for sensor data we want to only respond to these if this device has a sensor on that address
+					//if not then we should not respond at all, which allows a different client to respond if it supports
+					//that address.
+					//But as a host, we have to process the request and send RECEIVE else no other clients will be aware of 
+					//the poll.
 
-				//2026-07-26 hang on, we want to read the debounced reading, not the instantaneous reading
-				//and if no such sensor exists, do we return low or hi?	
 					sensorEvent(addr, nsESPaccessory::getSensorState(addr));
-					//sensorEvent queues a message in the buffer
+					//sensorEvent queues a message in the buffer if the sensor exists on this device
+
+/*2026-08-08
+ok so as a host this works. if you poll sensor 19 from JRMI, this host will echo the message as SENT OK but will
+not generate a final RECEIVE state message if the device 19 is not present on this host.  meanwhile JRMI will broadcast
+the first RECEIVE message on port 4234 which invites other ESP_ACC clients to respond. If they do, they need to respond 
+with a SEND message and will see that come back as a RECEIVE followed by SENT OK.  The client should not respond to this
+message else it will get stuck in a loop.  Easiest way is to put a timer on the sensor which will put a blanking delay on it
+for say 2 sec after it raises an event, but this delay is cleared on sighting of the next SENT OK message.
+
+*/
 
 
-//					tokens[2] &= 0b01101111;  
-	//				tokens[2] += nsESPaccessory::pollSensor(addr) ? 0b10000 : 0;
-
-					//recalculate checksum
-		//			tokens[3] = 0xFF ^ tokens[2] ^ tokens[1] ^ tokens[0];
-			//		snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", tokens[0], tokens[1], tokens[2], tokens[3]);
-				//	nsESPaccessory::queueMessage(buf);
-					
-					//sensor event sends;
-					//snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
-					//so actually, as soon as we have decoded the address, we can call sensorEvent with addr and state
 
 			}
 			return;
@@ -282,10 +285,18 @@ this <B1> opcode encodes current OUTPUT levels
 }
 
 /// <summary>
-/// declare a sensor event
+/// declare a sensor event as a loconet message
 /// </summary>
-/// <param name="event">false </param>
-void nsLOCONETaccessoryProcessor::sensorEvent(uint16_t address,bool event) {
+/// <param name="event">event state we are declaring with -1 meaning no sensor found </param>
+void nsLOCONETaccessoryProcessor::sensorEvent(uint16_t address,int8_t event) {
+	if (nsESPaccessory::getVerbose()) {
+		Serial.printf("sensor event %d val %d\n", address, event);
+	};
+
+//If this device does not host this sensor, then do not transmit a RECEIVE message
+	if (event < 0) return;
+
+
 /* <0xB2>,<SN1>,<SN2>,<CHK> SENSOR state REPORT  NO feedback
 <SN1> =<0,A6,A5,A4- A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
 <SN2> =<0,1,I,L- A10,A9,A8,A7> Report/status bits and 4 MS adr bits.
