@@ -17,15 +17,16 @@
 
 using namespace nsLOCONETaccessoryProcessor;
 
+/*
 void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, void* data, size_t len) {
-	trace(Serial.printf("\nLOCOnet %s \n", client->remoteIP().toString().c_str());)
-
+	//trace(Serial.printf("\nLOCOnet %s \n", client->remoteIP().toString().c_str());)
 		//malloc gives more efficient memory usage than a fixed buffer - remember to use free
 		char* buffer;
 	buffer = (char*)malloc(len + 1);
 	//incoming *data was void, need to cast to const char
 	strncpy(buffer, (const char*)data, len);
 	buffer[len] = '\0';  //terminate with a null
+	
 
 	//it appears incoming messages may include SEND-space as a prefix and cr multiple times over in 
 	//a single message.  Use SEND-space as a token separator.  Look ahead through buffer to find all tokens
@@ -39,12 +40,12 @@ void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, 
 			//sneaky; temporarily put a null terminator at ptrNext position
 			//so that we don't send the entire rest of string
 			ptrNext[0] = '\0';
-			tokenProcessor(ptr + 5, client);  //send part after "SEND "
+			tokenProcessor(ptr + 5, client,true);  //send part after "SEND "
 			ptrNext[0] = 'S';  //revert to S
 		}
 		else {
 			//last token
-			tokenProcessor(ptr + 5, client);  //send part after "SEND "
+			tokenProcessor(ptr + 5, client,true);  //send part after "SEND "
 			break;
 		}
 		ptr = ptrNext;
@@ -52,14 +53,84 @@ void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, 
 
 	free(buffer);
 }
+*/
+
+void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, void* data, size_t len) {
+	//trace(Serial.printf("\nLOCOnet %s \n", client->remoteIP().toString().c_str());)
+		//malloc gives more efficient memory usage than a fixed buffer - remember to use free
+		char* buffer;
+	buffer = (char*)malloc(len + 1);
+	//incoming *data was void, need to cast to const char
+	strncpy(buffer, (const char*)data, len);
+	buffer[len] = '\0';  //terminate with a null
+
+	if (nsESPaccessory::isLoconetHost()) {
+		//Loconet HOST. Incoming messages may include SEND-space as a prefix and cr multiple times over in 
+		//a single message.  Use SEND-space as a token separator.  Look ahead through buffer to find all tokens
+		char* ptr = strstr(buffer, "SEND ");
+		char* ptrNext;
+
+		while (ptr != nullptr) {
+			ptrNext = strstr(ptr + 5, "SEND ");
+
+			if (ptrNext != nullptr) {
+				//sneaky; temporarily put a null terminator at ptrNext position
+				//so that we don't send the entire rest of string
+				ptrNext[0] = '\0';
+				tokenProcessor(ptr + 5, client);  //send part after "SEND "
+				ptrNext[0] = 'S';  //revert to S
+			}
+			else {
+				//last token
+				tokenProcessor(ptr + 5, client);  //send part after "SEND "
+				break;
+			}
+			ptr = ptrNext;
+		}
+	}
+	else {
+		//Loconet CLIENT, incoming messages are prefixed with RECEIVE-space and may contain this and cr 
+		//multiple times in a single message
+		//Use RECIEVE-space as a token separator.  Look ahead through buffer to find all tokens
+
+		char* ptr = strstr(buffer, "RECEIVE ");
+		char* ptrNext;
+
+		while (ptr != nullptr) {
+			ptrNext = strstr(ptr + 8, "RECEIVE ");
+
+			if (ptrNext != nullptr) {
+				//sneaky; temporarily put a null terminator at ptrNext position
+				//so that we don't send the entire rest of string
+				ptrNext[0] = '\0';
+				tokenProcessor(ptr + 8, client);  //process part after "RECEIVE "
+				ptrNext[0] = 'R';  //revert to R
+			}
+			else {
+				//last token
+				tokenProcessor(ptr + 8, client);  //send part after "RECIEVE "
+				break;
+			}
+			ptr = ptrNext;
+		}
+	}
+
+
+	free(buffer);
+}
+
+
+
+
 
 
 
 
 /// <summary>
-/// Loconet token processor. The LocoNet over TCP protocol requries that every incoming loconet SEND XX YY message
+/// Loconet token processor. The LocoNet over TCP protocol requries that for a LocoNet HOST every incoming loconet SEND XX YY message
 /// be echoed out as RECEIVE XX YY followed by SENT OK.  Then the processor can actually process the message content.
 /// This processor only handles turnout, aspect and sensor messages
+/// For LocoNet CLIENTS, only RECEIVE messages are present in the message stream and we don't need to echo anything
 /// </summary>
 /// <param name="msg">A single incoming SEND message</param>
 /// <param name="client">TCP client</param>
@@ -73,19 +144,19 @@ void nsLOCONETaccessoryProcessor::tokenProcessor(char* msg, AsyncClient* client)
 #define BUFSIZE 25
 	char buf[BUFSIZE];
 
-	trace(Serial.printf("In: %s\r\n", msg);)
+	//trace(Serial.printf("In: %s\r\n", msg);)
 
-		//Loconet over TCP requires that we echo the message prefixed by RECEIVE
-		//and follow this with SENT OK
-		std::string m;
-	m.append("RECEIVE ");
-	m.append(msg);
-	m.append("\nSENT OK\n");
-
-	//retain a copy of the loconet message, but prefix with SEND
-	std::string msgCopy;
-	msgCopy = "SEND ";
-	msgCopy.append(msg);
+	//Loconet over TCP for HOST requires that we echo the message prefixed by RECEIVE
+	//and follow this with SENT OK.  For Loconet CLIENT we do not echo anything
+	std::string m;
+	
+	//msg is expected to be space separated hex values
+	if (nsESPaccessory::isLoconetHost()) {
+		m.append("RECEIVE ");
+		m.append(msg);
+		m.append("\nSENT OK\n");
+		nsESPaccessory::queueMessage(m);
+	}
 
 	char* tokenSplit = strtok(msg, " ");
 	while (tokenSplit != NULL) {
@@ -105,8 +176,6 @@ void nsLOCONETaccessoryProcessor::tokenProcessor(char* msg, AsyncClient* client)
 			return;
 	}
 
-
-	nsESPaccessory::queueMessage(m);
 	m.clear();
 
 	//TWO-TOKEN messages not supported
@@ -277,6 +346,8 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 
 				//final respone is LACK=<B4>,<7D>,<7F>,<chk> if CMD ok
 		nsESPaccessory::queueMessage("RECEIVE 0xB4 0x7D 0x7F 0x49\n");
+		//should only transmit this if we are HOST
+
 	}
 	break;
 	
@@ -289,7 +360,7 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 /// </summary>
 /// <param name="event">event state we are declaring with -1 meaning no sensor found </param>
 void nsLOCONETaccessoryProcessor::sensorEvent(uint16_t address,int8_t event) {
-	if (nsESPaccessory::getVerbose()) {
+	if (nsESPaccessory::getVerbose()) { 
 		Serial.printf("sensor event %d val %d\n", address, event);
 	};
 
@@ -313,23 +384,23 @@ this <B1> opcode encodes current OUTPUT levels
 */
 	uint8_t payload[4];
 	payload[0] = 0xB2;
-	//payload[1] = address & 0x7F;
-	//payload[2] = address >> 8;
-	//payload[2] += event ? 0b01010000 : 0b01000000;
 	
-	if (nsESPaccessory::getVerbose()) {
-		Serial.printf("sensor event %d val %d\n", address,event);
-	};
-
 	address--; //DCC address space starts at 1, but its mapped to base zero for loconet transmissions
 	payload[1] = (address >> 1) & 0x7F;  //drop <0> by shifting right
 	payload[2] = (address >> 8); //use rshift 8 as we want address <15-8> in posn <7-0>
-	payload[2] += event ? 0b01010000 : 0b01000000;  //event maps to IN2<4>
+	payload[2] += event ? 0b01010000 : 0b01000000;  //the event state maps to IN2<4>
 	payload[2] += (address & 0b1) << 5; //<0> of address maps to IN2<5>
 	payload[3] = 0xFF ^ payload[2] ^ payload[1] ^ payload[0];
 	
 	char buf[25];
-	snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+	if (nsESPaccessory::isLoconetHost()) {
+		//Loconet HOST declares async events as RECEIVE
+		snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+	}
+	else {
+		//Loconet CLIENT declares async events as SEND
+		snprintf(buf, 25, "SEND %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+	}
 	nsESPaccessory::queueMessage(buf);
 
 }

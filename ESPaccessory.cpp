@@ -3,6 +3,9 @@
 * 2026-08-08 bug. if you change SSID it fails to connect.  i think its adding unwanted chars...
 * its prob capturing a CRLF char on end that we don't want and we also need to skip thro the leading spaces
 * 
+* 2026-08-10 client and host are opposites.  host needs to respond to SEND and issue RECEIVE (sensor event is also RECEIVE)
+* whereas client needs to respond to RECEIVE (e.g. turnout) and issue SEND for sensor events
+* 
 * 
 * 2027-07-27 bugs
 * boots, but only bank 0 through to pin 8.
@@ -159,8 +162,8 @@ uint8_t bankSelect = 0;
 
 /*Modes;
 * C: connect via wifi to STA SSID and act as a client (i.e. when using with ESP_DCC_controller project)
-* S: connect via wifi to STA SSID and act as a loconet server (JRMI panel pro interworks directly with this module)
-* L: act as a standalone wifi AP and act as a loconet server (JRMI panel pro interworks directly with this module)
+* S: connect via wifi to STA SSID and act as a loconet host (JRMI panel pro interworks directly with this module)
+* L: act as a standalone wifi AP and act as a loconet host (JRMI panel pro interworks directly with this module)
 */
 
 
@@ -831,8 +834,8 @@ void checkSerial(void) {
 			char buffer[20];  //full of nulls
 			while (SerialBuffer[++i] == ' ') {}; //ignore leading spaces
 			strncpy(buffer, SerialBuffer + i, sizeof(bootController.MDNS));
-			memset(bootController.STA_SSID, '\0', sizeof(bootController.MDNS));
-			strncpy(bootController.STA_SSID, buffer, sizeof(bootController.MDNS));
+			memset(bootController.MDNS, '\0', sizeof(bootController.MDNS));
+			strncpy(bootController.MDNS, buffer, sizeof(bootController.MDNS));
 			Serial.printf("mDNS name set to %s\n", bootController.MDNS);
 			Serial.println(F("Now you must REBOOT\n\n"));
 			bootController.isDirty = true;
@@ -2475,7 +2478,9 @@ bool nsESPaccessory::getVerbose(void) {
 	return verbose;
 }
 
-
+bool nsESPaccessory::isLoconetHost(void) {
+	return bootController.Mode == 'S' ? true : false;
+}
 
 
 
@@ -3360,3 +3365,5 @@ static void prompt(bool ok) {
 	}
 	Serial.printf("bank %d>\n", bankSelect);
 }
+
+
