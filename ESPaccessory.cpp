@@ -142,18 +142,18 @@ using namespace nsESPaccessory;
 struct CONTROLLER
 {
 	long softwareVersion = 20260807;  //yyyymmdd captured as an integer
-	char AP_SSID[21] = "ESPACC";   //local SSID when operating as a stand alone LocoNet server
+	char AP_SSID[21] = "ACC_ESP";   //local SSID when operating as a stand alone LocoNet server
 	char AP_pwd[21] = "";
-	char AP_IP[17] = "192.168.6.2\0";   //note the actual setting requires comma separators
+	char AP_IP[17] = "192.168.6.2\0";   //local IP when acting as stand alone LocoNet server
 	char STA_SSID[21] = "Ossonet\0";  //SSID when running as a station on an external WiFi network
-	char STA_pwd[21] = "11223344AA\0";			//pwd for station
-	char tcpIP[17] = "192.168.1.121\0";   //target IP of CONTROLLER to connect to
-	uint16_t tcpPort = 1234;       //tcp port
+	char STA_pwd[21] = "1122334455\0";//pwd for station
+	char tcpIP[17] = "192.168.1.121\0";   //when acting as a client, target IP to connect to
+	uint16_t tcpPort = 1234;       //when acting as a client or server, the tcp port
 	char Mode = 'S';  //C denotes client, S server and L as standalone wifi server
 	bool hasPCA9685modules = false; //denotes PCA modules are present
 	uint16_t PCAservoMin = 150;
 	uint16_t PCAservoMax = 600;
-	char MDNS[17] = "ESP_ACC\0";  //mDNS name
+	char MDNS[17] = "ACC_ESP\0";  //mDNS name
 	bool isDirty = false;  //will be true if EEPROM needs to be written
 };
 
@@ -203,10 +203,9 @@ static os_timer_t payloadTimer;
 
 
 //++++++++++++++++++++ TURNOUTS, SIGNALS AND SENSORS ++++++++++++++++++++++++++++++++++++++++++++++
-//#define ESP_TOTAL_PINS 9
-//#define ESP_BASE_PIN 0
-#define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
-#define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
+/*hese two moved to header
+//#define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
+//#define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
 
 
 enum DEVICE_TYPES : uint8_t{
@@ -217,13 +216,15 @@ enum DEVICE_TYPES : uint8_t{
 	DEVICE_SENSOR_WPU,
 	DEVICE_I2C
 };
-
+*/
 
 
 bool MAScommandSync;
 
 /*servo control.  VIRTUALSERVO is each virtualised device with its params.  Commanded over serial for testing
 or DCC in normal operation. VIRTUALSERVO objects support both mechanical servos and LED aspect signals */
+
+/*move to header
 enum SERVOSTATE : uint8_t{
 	SERVO_NEUTRAL,
 	SERVO_TO_THROWN,
@@ -239,7 +240,9 @@ enum SERVOSTATE : uint8_t{
 	HEARTBEAT_LOW,
 	HEARTBEAT_HIGH
 };
+*/
 
+/*move this to header
 struct VIRTUALSERVO {
 	uint8_t bank;
 	uint8_t pin;
@@ -257,7 +260,7 @@ struct VIRTUALSERVO {
 	uint8_t aspectParameters[ASPECT_PARAMETER_SIZE * 4];
 	uint8_t MASstate;  //Multiple Aspect Signal commanded state
 };
-
+*/
 
 //virtual servo objects, there are 10 in Bank 0 (the ESP12, but we use pin 9 as a proxy for the A0 pin) and then 16 in each of Bank 1 and 2 which are PCA drivers
 VIRTUALSERVO virtualservoCollection[10];
@@ -330,10 +333,11 @@ void nsESPaccessory::ESPaccessorySetup() {
 	//choose boot mode
 	switch (bootController.Mode) {
 	case 'C':
-		//boot as a client on building wifi, to interwork with my ESP_DCC_Controller project
+		//boot as a client on building wifi, to interwork with my ESP_DCC_Controller project or JMRI loconet server
 		deviceState = S_BOOT_WIFI_STA_LOCONET_CLIENT;
 		WiFi.mode(WIFI_STA);
-		WiFi.setHostname("ESPACC");
+		//WiFi.setHostname("ACCESP");
+		WiFi.setHostname(bootController.STA_SSID);
 		Serial.printf("Connecting to Wifi %s", bootController.STA_SSID);
 		WiFi.begin(bootController.STA_SSID, bootController.STA_pwd);
 		break;
@@ -342,7 +346,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 		{//scope block
 		deviceState = S_BOOT_WIFI_AP_LOCONET_HOST;
 		WiFi.mode(WIFI_AP);
-		WiFi.setHostname("ESPACC");
+		WiFi.setHostname("ACC_ESP");
 		//wait for the softAP to start, then set the ip address
 		delayMicroseconds(500);
 		//IPAddress class requires the address to be provided as 4 octets
@@ -361,7 +365,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 		//boot as a loconet server on the building wifi
 		deviceState = S_BOOT_WIFI_AP_LOCONET_HOST;
 		WiFi.mode(WIFI_STA);
-		WiFi.setHostname("ESPACC");
+		WiFi.setHostname(bootController.STA_SSID);
 		Serial.printf("Connecting to Wifi %s", bootController.STA_SSID);
 		WiFi.begin(bootController.STA_SSID, bootController.STA_pwd);
 	}
@@ -398,7 +402,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 		
 	}
 	
-	//2026-07-26 allow user to find device via http://ESP_ACC.local rather than using the assigned IP address
+	//2026-07-26 allow user to find device via http://ACC_ESP.local rather than using the assigned IP address
 	//note that browsing to ESP_ACC gives a connection refused error as we are not running a web server
 
 	if (!MDNS.begin(bootController.MDNS)) {
@@ -411,6 +415,8 @@ void nsESPaccessory::ESPaccessorySetup() {
 	os_timer_setfn(&servoTimer, (os_timer_func_t*)processServo, NULL);
 	os_timer_arm(&servoTimer, SERVO_TIMEOUT, true);
 	
+	
+
 }
 
 
@@ -418,7 +424,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 void nsESPaccessory::ESPaccessoryLoop() {
 	//2026-07-26 keep refreshing the MDNS
 	MDNS.update();
-
+	
 
 	static unsigned long previousMillis;
 	static unsigned long interval;
@@ -500,11 +506,11 @@ void nsESPaccessory::ESPaccessoryLoop() {
 #pragma region "...TCP..."
 
 //called every 10 sec from intervalTimer
-//it sends a heartbeat message when acting as a TCP client
+//it sends a heartbeat message when acting as a TCP client. This is used by the DCC_ESP controller
 static void heartbeat(void* arg) {
 	if (deviceState != S_TCP_CONNECTED_AS_CLIENT) return;
 	AsyncClient* client = reinterpret_cast<AsyncClient*>(arg);
-	queueMessage("ESPACC\n\0");
+	queueMessage("ACCESP\n\0");
 }
 
 //event callback for TCP inbound data whether we are in server or client mode
@@ -795,6 +801,12 @@ void checkSerial(void) {
 		}
 
 		if (SerialBuffer[0] == 'X') {
+			std::string s;
+			dumpX(s);
+			//replaceAll(s, "\n", "<br/>\n");  //can replace cr with <br/>
+			Serial.println(s.c_str());
+
+			/*
 			//wifi and IP configs
 			Serial.printf("\nSoftware ver %d\n", bootController.softwareVersion);
 			Serial.print("MAC ");
@@ -822,6 +834,7 @@ void checkSerial(void) {
 				Serial.printf("Loconet server IP %s\n", bootController.tcpIP);
 				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
 			}
+			*/
 			prompt();
 			Serial.printf("PCA min %d\n", bootController.PCAservoMin);
 			Serial.printf("PCA max %d\n", bootController.PCAservoMax);
@@ -1611,6 +1624,12 @@ void checkSerial(void) {
 					Serial.print(vs.continuous, DEC);
 					Serial.print(F("  rate "));
 					Serial.print(vs.rate, DEC);
+
+					//buff test
+					//char buff[50];
+					//snprintf(buff, sizeof(buff), "%d", vs.rate);
+					//std::string myString;
+					//myString.append(buff);
 					break;
 
 				case DEVICE_ASPECT:
@@ -3366,4 +3385,71 @@ static void prompt(bool ok) {
 	Serial.printf("bank %d>\n", bankSelect);
 }
 
+void nsESPaccessory::dumpX (std::string &s) {
+	//use const std::string &s for efficient read only
+	char buf[100];
 
+
+	//wifi and IP configs
+	snprintf(buf,sizeof(buf),"\nSoftware ver %d\nMAC ", bootController.softwareVersion);
+	s.append(buf);
+	s.append(WiFi.macAddress().c_str());
+	snprintf(buf,sizeof(buf),"\nmDNS name %s\n", bootController.MDNS);
+	s.append(buf);
+	
+	switch (bootController.Mode) {
+	case 'S':
+		snprintf(buf,sizeof(buf),"Network SSID %s\n", bootController.STA_SSID);
+		s.append(buf);
+		s.append("Running as LocoNet SERVER\nLoconet server IP "); //cannot use F to make a string literal
+		s.append(WiFi.localIP().toString().c_str());
+		snprintf(buf,sizeof(buf),"\nLoconet port %d\n\n", bootController.tcpPort);
+		s.append(buf);
+		break;
+	case 'L':
+		snprintf(buf,sizeof(buf),"Running as standalone LocoNet SERVER\nSSID %s\n", bootController.AP_SSID);
+		s.append(buf);
+		snprintf(buf,sizeof(buf),"LocoNet server IP %s\nLoconet port %d\n\n", WiFi.softAPIP().toString().c_str(), bootController.tcpPort);
+		s.append(buf);
+		break;
+	case  'C':
+		snprintf(buf,sizeof(buf),"Network SSID %s\nRunning as Loconet CLIENT\n", bootController.STA_SSID);
+		s.append(buf);
+		snprintf(buf,sizeof(buf),"Loconet server IP %s\nLoconet port %d\n\n", bootController.tcpIP, bootController.tcpPort);
+		s.append(buf);
+	}
+	//prompt();
+	//Serial.printf("PCA min %d\n", bootController.PCAservoMin);
+	//Serial.printf("PCA max %d\n", bootController.PCAservoMax);
+
+}
+
+void nsESPaccessory::replaceAll(std::string& src, const std::string& from, const std::string& to) {
+	if (from.empty()) return;
+
+	size_t start_pos = 0;
+	// Find the next occurrence starting from the last replaced position
+	while ((start_pos = src.find(from, start_pos)) != std::string::npos) {
+		src.replace(start_pos, from.length(), to);
+
+		// Move forward to avoid infinite loops if 'to' contains 'from'
+		start_pos += to.length();
+	}
+}
+
+std::string nsESPaccessory::getWsUri() {
+	std::string wsUri = "ws://";
+	//"ws://192.168.6.1:12080/";
+
+
+	if (WiFi.getMode() == WIFI_AP) {
+		//send the AP default gateway
+		wsUri.append( bootController.AP_IP);
+	}
+	else {
+		wsUri.append(WiFi.localIP().toString().c_str());
+	}
+//add the port which hardcoded
+	wsUri.append(":12080");
+	return wsUri;
+}

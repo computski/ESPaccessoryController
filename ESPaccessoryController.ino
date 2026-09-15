@@ -25,8 +25,12 @@
 
 
 
+
+
+
 #include "ESPservo.h"
 #include "ESPaccessory.h"
+#include "ACCweb.h"
 
 /*Because the Arduino IDE is rather basic and requires an .INO file, this creates issues because
 modules cannot see functions declared in that .ino file. For this reason, the .INO is used as a shell
@@ -34,16 +38,19 @@ and all the code is moved into modules with their own cpp and hpp headers*/
 
 
 using namespace nsESPaccessory;
+using namespace nsACCweb;
 
 void setup() {
 	//set system frequency from the IDE
 	//system_update_cpu_freq(160);  //this will double the clock speed from 80MHz
 	ESPservoInit();
 	ESPaccessorySetup();
-
+	startWebServices();
 }
 
 void loop() {
 	ESPaccessoryLoop();
+	loopWebServices();
+	
 }
 

@@ -25,6 +25,9 @@
     <ClCompile Include="ESPservo.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ACCweb.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="__vm\.ESPaccessoryController.vsarduino.h">
@@ -37,6 +40,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ESPservo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ACCweb.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

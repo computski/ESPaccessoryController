@@ -1,0 +1,44 @@
+https://www.google.com/search?q=cpp+can+you+declare+a+struct+in+.h+and+initialise+its+values&rlz=1C1CHBF_enAU1138AU1138&oq=cpp+can+you+declare+a+struct+in+.h+and+initialise+its+values&gs_lcrp=EgZjaHJvbWUyBggAEEUYOTIHCAEQABjvBTIHCAIQABjvBTIHCAMQABjvBTIHCAQQABjvBdIBCTIwNTA0ajBqOagCBrACAfEFNbcJwHmHrkk&sourceid=chrome&source=chrome.ob&ie=UTF-8
+
+Yes, you can declare a struct in a .h file and initialize its values, but how you do it depends on whether you mean initializing default values for the structure type or creating a global instance with initial values.Here is how to handle both scenarios correctly without causing linker errors.
+
+Scenario 1: Setting default values for the struct members (Recommended)If you want every new variable of this struct type to start with specific default values, you can use Non-Static Member Initialization directly inside the header file.
+cpp// point.h
+#ifndef POINT_H
+#define POINT_H
+
+struct Point {
+    int x = 0;        // Default value
+    int y = 10;       // Default value
+    double scale = 1.0;
+};
+
+#endif
+
+How to use it in your .cpp files:cpp#include "point.h"
+
+int main() {
+    Point p1;         // p1.x is 0, p1.y is 10, p1.scale is 1.0
+    Point p2{5, 5};   // You can still override them: p2.x is 5, p2.y is 5, p2.scale is 1.0
+}
+
+
+
+Scenario 2: Creating a global instance with initial values   <<< THIS ONE AND YES ESP8266 IS C++17 and supports inline
+If you want to create an actual object instance inside the header file that can be accessed by multiple .cpp files, you must be careful. If you define a normal variable in a header, you will get a "multiple definition" linker error if that header is included more than once. [1] (https://stackoverflow.com/questions/4490965/how-to-initialize-a-a-struct-of-structs-inside-a-header-file-in-c)To fix this, you have two choices depending on your C++ version:Option A: Using inline (Modern C++17 and newer)The cleanest way is to use the inline keyword. This tells the compiler it is perfectly fine for this global variable to be seen in multiple files.
+
+// config.h
+#ifndef CONFIG_H
+#define CONFIG_H
+
+struct AppConfig {
+    int maxUsers;
+    bool debugMode;
+};
+
+// Declared and initialized in the header safely:
+inline AppConfig globalConfig{100, true}; 
+
+#endif
+
+and to use it in other cpp files you include config.h and then use globalConfig or prefix this with a namespace if you used one
