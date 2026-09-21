@@ -112,7 +112,7 @@ on the PCA9685 device it will be pins 0-15
 #include "ESPservo.h"
 #include <stdint.h>
 #include <Wire.h>
-#include <ESP8266mDNS.h>
+
 #include <Adafruit_PWMServoDriver.h>
 //https://github.com/adafruit/Adafruit-PWM-Servo-Driver-Library/blob/master/examples/servo/servo.ino
 
@@ -139,6 +139,7 @@ using namespace nsESPaccessory;
 
 //version control and capture of some system defaults for new compilations
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
+/*
 struct CONTROLLER
 {
 	long softwareVersion = 20260807;  //yyyymmdd captured as an integer
@@ -158,6 +159,9 @@ struct CONTROLLER
 };
 
 CONTROLLER bootController;
+*/
+
+
 uint8_t bankSelect = 0;
 
 /*Modes;
@@ -297,7 +301,7 @@ void bootTCPclient(void);
 void bootTCPserver(void);
 void stringIPtoArray(char* s, uint8_t* myIP);
 void eeGetSettings(void);
-void eePutSettings(void);
+//void eePutSettings(void);
 void checkSerial(void);
 static void sendEnqueuedMessages();
 static void PCAservoWrite(VIRTUALSERVO *vs, uint8_t bank, bool attach);
@@ -402,12 +406,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 		
 	}
 	
-	//2026-07-26 allow user to find device via http://ACC_ESP.local rather than using the assigned IP address
-	//note that browsing to ESP_ACC gives a connection refused error as we are not running a web server
-
-	if (!MDNS.begin(bootController.MDNS)) {
-		Serial.println("Error setting up MDNS responder!");
-	}
+	
 
 
 
@@ -422,8 +421,7 @@ void nsESPaccessory::ESPaccessorySetup() {
 
 
 void nsESPaccessory::ESPaccessoryLoop() {
-	//2026-07-26 keep refreshing the MDNS
-	MDNS.update();
+	
 	
 
 	static unsigned long previousMillis;
@@ -913,6 +911,7 @@ void checkSerial(void) {
 
 		if (SerialBuffer[0] == 'R') {
 			Serial.println(F("REBOOTING...\n\n"));
+			Serial.flush();
 			ESP.restart();
 		}
 
@@ -2452,7 +2451,8 @@ void eeGetSettings(void) {
 /// <summary>
 /// save settings to EEPROM, we save the bootController struct
 /// </summary>
-void eePutSettings(void) {
+
+void  nsESPaccessory::eePutSettings(void) {
 	if (bootController.isDirty == false) { return; }
 	int eeAddr = 0;
 	EEPROM.put(eeAddr, bootController);
@@ -3437,19 +3437,3 @@ void nsESPaccessory::replaceAll(std::string& src, const std::string& from, const
 	}
 }
 
-std::string nsESPaccessory::getWsUri() {
-	std::string wsUri = "ws://";
-	//"ws://192.168.6.1:12080/";
-
-
-	if (WiFi.getMode() == WIFI_AP) {
-		//send the AP default gateway
-		wsUri.append( bootController.AP_IP);
-	}
-	else {
-		wsUri.append(WiFi.localIP().toString().c_str());
-	}
-//add the port which hardcoded
-	wsUri.append(":12080");
-	return wsUri;
-}
