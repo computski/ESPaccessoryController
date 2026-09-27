@@ -446,7 +446,7 @@ function scooby(){
 const table = document.getElementById('table1');
 const tbody = table.querySelector("tbody") || table;
 const sourceRow = tbody.rows[1];
-for (i=0;i<7;i++){
+for (i=0;i<8;i++){
 const clonedRow = sourceRow.cloneNode(true);
 tbody.appendChild(clonedRow);
 }
@@ -569,28 +569,6 @@ return;
 <td name="state[]"></td>
 </tr>
 
-<tr>
-<td><select name="mode[]">
-<option value="Servo">Servo</option>
-<option value="Sensor">Sensor</option>
-<option value="Aspect">Aspect</option>
-<option value="MAS">MAS</option>
-</select>
-</td>
-<td name="pin[]"></td>
-<td><input type="text" name="addr[]"/></td>
-<td><input type="text" name="swing[]"/></td>
-<td><input type="checkbox" name="invert[]"/></td>
-<td><input type="checkbox" name="cont[]"/></td>
-<td><input type="text" name="rate[]"/></td>
-
-<td><input type="text" name="MASh[]" style="width: 8vw"/></td>
-<td><input type="text" name="MASl[]" style="width: 8vw"/></td>
-<td><input type="text" name="MAShF[]" style="width: 8vw"/></td>
-<td><input type="text" name="MASlF[]" style="width: 8vw"/></td>
-
-<td name="state[]"></td>
-</tr>
 </tbody>
 
 <tfoot>
