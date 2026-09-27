@@ -267,9 +267,13 @@ struct VIRTUALSERVO {
 */
 
 //virtual servo objects, there are 10 in Bank 0 (the ESP12, but we use pin 9 as a proxy for the A0 pin) and then 16 in each of Bank 1 and 2 which are PCA drivers
+//2026-09-23 moved to .h and made inline
+
+/*
 VIRTUALSERVO virtualservoCollection[10];
 VIRTUALSERVO virtualservoCollectionBank1[16];
 VIRTUALSERVO virtualservoCollectionBank2[16];
+*/
 
 Adafruit_PWMServoDriver PCAbank1 = Adafruit_PWMServoDriver(0x40);
 Adafruit_PWMServoDriver PCAbank2 = Adafruit_PWMServoDriver(0x41);
@@ -1426,7 +1430,7 @@ void checkSerial(void) {
 
 		//SENSOR command. sets up a sensor on a given pin, by default will be WPU a zero param is given
 		//some pins have pulldowns on the board and the WPU may not be enough to overcome these.
-		//usage k pin address [wpu]
+		//usage k pin address wpu
 		if (SerialBuffer[0] == 'k') {
 			if (bankSelect != 0) {
 				Serial.println(F("Sensors only supported on bank 0"));
@@ -1465,9 +1469,16 @@ void checkSerial(void) {
 						break;
 
 					case 3:
-						//optional WPU
-						if (strtol(pch, NULL, 10) == 0) break;
-						vsParse.deviceType = DEVICE_SENSOR_WPU;
+						//optional WPU.  Problem, if this was set WPU there is no way to un-set it.
+						//omission of the param is ignored rather than a default removal of property
+						if (strtol(pch, NULL, 10) != 0) {
+							vsParse.deviceType = DEVICE_SENSOR_WPU;
+						}
+						else 
+						{ vsParse.deviceType = DEVICE_SENSOR; }
+						
+						//pin 9 which is AO is always non WPU
+						if (vsParse.pin==9) vsParse.deviceType = DEVICE_SENSOR;
 						break;
 					}
 
@@ -1475,7 +1486,7 @@ void checkSerial(void) {
 					if (!resolved) break;
 				}
 
-				if (resolved && (i >= 2)) {
+				if (resolved && (i >= 3)) {
 					for (auto& vs : virtualservoCollection) {
 						if (vs.pin != vsParse.pin) continue;
 						//copy servoParse to vs

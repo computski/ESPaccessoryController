@@ -47,8 +47,7 @@ namespace nsESPaccessory {
 		HEARTBEAT_LOW,
 		HEARTBEAT_HIGH
 	};
-
-
+	
 	struct VIRTUALSERVO {
 		uint8_t bank;
 		uint8_t pin;
@@ -98,7 +97,9 @@ namespace nsESPaccessory {
 
 	//make this available as a global
 inline	CONTROLLER bootController;
-
+inline VIRTUALSERVO virtualservoCollection[10];
+inline VIRTUALSERVO virtualservoCollectionBank1[16];
+inline VIRTUALSERVO virtualservoCollectionBank2[16];
 
 	void ESPaccessoryLoop();
 	void ESPaccessorySetup();

@@ -6,6 +6,10 @@
 #include "ESPaccessory.h"
 #include <ESP8266mDNS.h>
 
+/*Known issue. ESP8266WebServer has a problem with serving a file > 21kb.  My bank0 page is 21,856 (with 8 TR) but 22,592 with 9 TR
+and at that point i get a ERR_CONTENT_LENGTH_MISMATCH on the browser.*/
+
+
 
 
 
@@ -14,6 +18,7 @@ using namespace nsACCweb;
 
 //reate a web server on port 80.  problems https://github.com/esp8266/Arduino/issues/4085
 ESP8266WebServer web(80);
+//AsyncWebServer web(80);
 
 //declare as a pointer, we need to instantate once wsPort is pulled from eeprom
 WebSocketsServer* webSocket;
@@ -32,8 +37,11 @@ void handleRoot() {
 
 		if (LittleFS.exists("/index.htm")) {
 			File file = LittleFS.open("/index.htm", "r");
+			
+			//old ESP8266webserver only
 			//web.sendHeader("Set-Cookie", "ESPSESSIONID=1");  //experiment, can we send a value via cookie
-			web.sendHeader("Set-Cookie", getWsUri().c_str());
+			//web.sendHeader("Set-Cookie", getWsUri().c_str());
+
 			size_t sent = web.streamFile(file, "text/html");  //we know its html!
 			file.close();
 		}
@@ -106,6 +114,7 @@ void getHardware() {
 	JsonDocument doc;
 	doc["wsUri"] = getWsUri();
 	doc["cpu"] = ESP.getCpuFreqMHz();
+	doc["hasPCA"] = nsESPaccessory::bootController.hasPCA9685modules;
 
 	//We can avoid a String class, but need to guesstimate a useful buffer size
 	char jsonChar[512]; 
@@ -136,8 +145,15 @@ void nsACCweb::startWebServices() {
 	//special GET handlers
 	//https://forum.arduino.cc/index.php?topic=476291.0
 	web.on("/hardware", HTTP_GET, []() {getHardware(); });
-
 	web.on("/submit", HTTP_POST, handleFormSubmit);
+
+	/* Define route with inline lambda request handler.  asyncwebserver
+	web.on("/hardware", HTTP_GET, [](AsyncWebServerRequest* request) {
+		getHardware(request);
+		});
+		*/
+
+
 
 	web.begin();
 	Serial.println(F("HTTP server started."));
@@ -203,7 +219,7 @@ void nsACCweb::startWebServices() {
 
 			if (strcmp(sPage, "bank0") == 0) {
 				//callout to bank0 routine
-				//nsDCCweb::DCCwebWS(doc);
+				processBank(doc);
 				return;
 			}
 
@@ -215,7 +231,7 @@ void nsACCweb::startWebServices() {
 
 	void nsACCweb::sendJson(JsonObject & out) {
 		//We can avoid a String class, but need to guesstimate a useful buffer size
-		char payload[800];
+		char payload[5000];
 		//JSON 7
 		serializeJson(out, payload, sizeof(payload));
 		webSocket->broadcastTXT(payload);
@@ -223,7 +239,8 @@ void nsACCweb::startWebServices() {
 
 	void nsACCweb::sendJson(JsonDocument out) {
 		//We can avoid a String class, but need to guesstimate a useful buffer size
-		char payload[800];
+		//5kb is big enough for Bank1 and 2
+		char payload[5000];
 		serializeJson(out, payload, sizeof(payload));
 		webSocket->broadcastTXT(payload);
 
@@ -366,6 +383,139 @@ void nsACCweb::startWebServices() {
 
 
 	}
+
+
+
+	void nsACCweb::processBank(JsonDocument& doc) {
+		using namespace nsESPaccessory;
+		const std::string devType[6] = { "Servo","Aspect","MAS","SensorW","Sensor","I2C" };
+		const std::string servoState[13] = { "Neutral","x","Thrown","x","Closed","x","Thrown","Closed","MAS","High","Low","x","x" };
+
+		//default response is a poll
+		JsonDocument out;
+		out["page"] = "bank0";
+		out["action"] = "poll";
+		
+		
+		const char* v = doc["action"];
+		//actions are poll|write
+
+		//for write, need to validate inputs, note that non-numerics or missing strings are converted to 0 when
+		//an integer output is desired.
+
+		if (strcmp(v, "write") == 0) {
+			//we copy existing item to vsParse, update it there and only write back to original item if validation is good
+			VIRTUALSERVO vsParse;
+
+			for (auto& vs : virtualservoCollection) {
+				//only update items flagged as dirty				   
+				if (doc["pins"][vs.pin]["dirty"]) {
+					vsParse = vs;
+					bool fail = true;
+					
+					//Only parse device-specific fields
+					std::string mode = doc["pins"][vs.pin]["mode"];
+						
+					if (mode == "Servo") { 
+						//servo specific fields	
+						vsParse.deviceType = DEVICE_SERVO;
+						uint8_t swing = doc["pins"][vs.pin]["swing"];
+						if (swing < 91) { vsParse.swing = swing;fail = false; }
+										
+						int8_t rate = doc["pins"][vs.pin]["rate"];
+						if ((rate > -10) && (rate < 10)) { vsParse.rate = rate;fail = false; }
+					}
+					
+					if (mode == "MAS") { 
+						vsParse.deviceType = DEVICE_MAS;
+						//expect the MASarray to be 64chars each should be 0-9 A-F
+						std::string MASarray= doc["pins"][vs.pin]["MASarray"];
+
+						//lamda function
+						bool is_valid = std::all_of(MASarray.begin(), MASarray.end(), [](unsigned char c) {
+							return std::isxdigit(c);
+							});
+
+						if ((MASarray.size() == 64) && is_valid) { 
+							//need to parse the hex chars into array of uint8
+							
+							for (int i = 0;i < 32;i++) {
+								//advance through MSarray two hex chrs at a time and convert to uint8_t
+								vsParse.aspectParameters[i]= std::stoi(MASarray.substr(i*2, 2), nullptr, 16);
+							}
+						fail = false; }
+					}
+
+					if (mode == "Aspect") { vsParse.deviceType = DEVICE_ASPECT;fail = false; }
+					if (mode == "Sensor") { vsParse.deviceType = DEVICE_SENSOR;fail = false; }
+					if (mode == "SensorW") { vsParse.deviceType = DEVICE_SENSOR_WPU;fail = false; }
+
+					//any other modes such as I2C or interstitial states are ignored and leave fail=true
+
+					if (!fail) {
+						//all modes, update dcc address and boolean fields
+						//sending a string or neg number will result in addr 0 which disables that pin
+						uint16_t addr = doc["pins"][vsParse.pin]["addr"];
+						if (addr > 2048) fail = true;
+						vsParse.address = addr;
+
+						vsParse.invert = doc["pins"][vs.pin]["invert"];
+						vsParse.continuous = doc["pins"][vs.pin]["cont"];
+					}
+
+					//if validation passes, we write back
+					if (!fail) {
+						vs = vsParse;
+						bootController.isDirty = true;
+						eePutSettings();
+					}
+					Serial.printf("pin update %d %s result=%d\n", vs.pin, mode.c_str(),fail);
+				}
+			}
+		}
+
+		//then whether write or poll, we roll into returning the updated out object		
+
+
+		// Create the "pins" array inside the main object
+		JsonArray pins = out["pins"].to<JsonArray>();
+
+		using namespace nsESPaccessory;
+
+		//Need to create lambda function and then call it with the appropriate bank
+		
+		for (auto &vs : virtualservoCollection) {
+			// Add the first pin object
+			JsonObject pin = pins.add<JsonObject>();
+			pin["mode"] = devType[vs.deviceType];
+			pin["pin"] = vs.pin;
+			pin["addr"] = vs.address;
+			pin["invert"] = vs.invert;
+			pin["cont"] = vs.continuous;
+			pin["swing"] = vs.swing;
+			pin["rate"] = vs.rate;
+			//pin["notSupported"] = vs.ignorePowerParameter;
+
+			pin["MASstate"] = vs.MASstate;  //vs.state
+			pin["state"] = servoState[vs.state];
+
+			//vs.aspectParameters is a 32 byte array. we convert it here to a hex string of 64 char
+			char buffer[70];
+			char* ptr = buffer;
+			for (int i = 0;i <sizeof(vs.aspectParameters);i++) {
+				//we know we are creating 2 chars with a trailling null
+				//and we know 70 chars is sufficient without need to track end of buffer, hence use 3
+				snprintf(ptr, 3, "%02X", vs.aspectParameters[i]);
+				ptr += 2;
+			}
+			pin["MASarray"] = buffer;
+
+		}
+
+		sendJson(out);
+	}
+
+
 
 	std::string nsACCweb::getWsUri() {
 		std::string wsUri = "ws://";

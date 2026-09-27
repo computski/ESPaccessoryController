@@ -28,6 +28,8 @@
 
 
 
+#include <ArduinoJson.h>
+#include <ArduinoJson.hpp>  //apparently ver 7.4.3
 #include "ESPservo.h"
 #include "ESPaccessory.h"
 #include "ACCweb.h"

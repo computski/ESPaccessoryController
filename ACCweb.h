@@ -18,8 +18,9 @@ is to have the client page call /hardware as a GET and return a JSON string. Thi
 	#include "WProgram.h"
 #endif
 
-#include <ESP8266WebServer.h>
-#include <ArduinoJson.h>
+#include <ESP8266WebServer.h>  //not using this
+//#include <ESPAsyncWebServer.h> // The core async web server library  NOT USING
+#include <ArduinoJson.h>  //what version is this
 #include <LittleFS.h>
 #include <WebSockets.h>  //from arduino library manager. Markus Sattler v2.1
 #include <WebSocketsServer.h>
@@ -34,6 +35,7 @@ namespace nsACCweb {
 	void sendJson(JsonObject& out);
 	void sendJson(JsonDocument out);
 	void processHardware(JsonDocument &doc);
+	void processBank(JsonDocument& doc);
 	std::string getWsUri();
 }
 
