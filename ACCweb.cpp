@@ -388,62 +388,67 @@ void nsACCweb::startWebServices() {
 
 	void nsACCweb::processBank(JsonDocument& doc) {
 		using namespace nsESPaccessory;
-		const std::string devType[6] = { "Servo","Aspect","MAS","SensorW","Sensor","I2C" };
-		const std::string servoState[13] = { "Neutral","x","Thrown","x","Closed","x","Thrown","Closed","MAS","High","Low","x","x" };
+		//const std::string devType[6] = { "Servo","Aspect","MAS","SensorW","Sensor","I2C" };
+		//const std::string servoState[13] = { "Neutral","x","Thrown","x","Closed","x","Thrown","Closed","MAS","High","Low","x","x" };
+		std::string targetBank = doc["page"];
 
 		//default response is a poll
 		JsonDocument out;
-		out["page"] = "bank0";
+		out["page"] = targetBank;
 		out["action"] = "poll";
+		// Create the "pins" array inside the main object
+		JsonArray pins = out["pins"].to<JsonArray>();
+				
 		
-		
-		const char* v = doc["action"];
+
 		//actions are poll|write
 
 		//for write, need to validate inputs, note that non-numerics or missing strings are converted to 0 when
 		//an integer output is desired.
 
-		if (strcmp(v, "write") == 0) {
-			//we copy existing item to vsParse, update it there and only write back to original item if validation is good
-			VIRTUALSERVO vsParse;
-
-			for (auto& vs : virtualservoCollection) {
+			
+			//lambda function to process inbound doc. Use &vs to write back to the virtualservo array element
+			//generic, does not treat vs0,1,2 any differently even though vs0 has locked modes for pin0 and 9
+			auto localHelperInput = [doc](VIRTUALSERVO &vs) {
+				//we copy existing item to vsParse, update it there and only write back to original item if validation is good
+				VIRTUALSERVO vsParse;
 				//only update items flagged as dirty				   
-				if (doc["pins"][vs.pin]["dirty"]) {
+				if (!doc["pins"][vs.pin]["dirty"]) return;
 					vsParse = vs;
 					bool fail = true;
-					
-					//Only parse device-specific fields
+
+					//Parse device-specific fields
 					std::string mode = doc["pins"][vs.pin]["mode"];
-						
-					if (mode == "Servo") { 
+
+					if (mode == "Servo") {
 						//servo specific fields	
 						vsParse.deviceType = DEVICE_SERVO;
 						uint8_t swing = doc["pins"][vs.pin]["swing"];
 						if (swing < 91) { vsParse.swing = swing;fail = false; }
-										
+
 						int8_t rate = doc["pins"][vs.pin]["rate"];
 						if ((rate > -10) && (rate < 10)) { vsParse.rate = rate;fail = false; }
 					}
-					
-					if (mode == "MAS") { 
+
+					if (mode == "MAS") {
 						vsParse.deviceType = DEVICE_MAS;
 						//expect the MASarray to be 64chars each should be 0-9 A-F
-						std::string MASarray= doc["pins"][vs.pin]["MASarray"];
+						std::string MASarray = doc["pins"][vs.pin]["MASarray"];
 
 						//lamda function
 						bool is_valid = std::all_of(MASarray.begin(), MASarray.end(), [](unsigned char c) {
 							return std::isxdigit(c);
 							});
 
-						if ((MASarray.size() == 64) && is_valid) { 
+						if ((MASarray.size() == 64) && is_valid) {
 							//need to parse the hex chars into array of uint8
-							
+
 							for (int i = 0;i < 32;i++) {
 								//advance through MSarray two hex chrs at a time and convert to uint8_t
-								vsParse.aspectParameters[i]= std::stoi(MASarray.substr(i*2, 2), nullptr, 16);
+								vsParse.aspectParameters[i] = std::stoi(MASarray.substr(i * 2, 2), nullptr, 16);
 							}
-						fail = false; }
+							fail = false;
+						}
 					}
 
 					if (mode == "Aspect") { vsParse.deviceType = DEVICE_ASPECT;fail = false; }
@@ -451,14 +456,12 @@ void nsACCweb::startWebServices() {
 					if (mode == "SensorW") { vsParse.deviceType = DEVICE_SENSOR_WPU;fail = false; }
 
 					//any other modes such as I2C or interstitial states are ignored and leave fail=true
-
 					if (!fail) {
 						//all modes, update dcc address and boolean fields
 						//sending a string or neg number will result in addr 0 which disables that pin
 						uint16_t addr = doc["pins"][vsParse.pin]["addr"];
 						if (addr > 2048) fail = true;
 						vsParse.address = addr;
-
 						vsParse.invert = doc["pins"][vs.pin]["invert"];
 						vsParse.continuous = doc["pins"][vs.pin]["cont"];
 					}
@@ -469,23 +472,17 @@ void nsACCweb::startWebServices() {
 						bootController.isDirty = true;
 						eePutSettings();
 					}
-					Serial.printf("pin update %d %s result=%d\n", vs.pin, mode.c_str(),fail);
-				}
-			}
-		}
+					Serial.printf("pin update %d %s result=%d\n", vs.pin, mode.c_str(), fail);
+				
+			};//end lambda
+	
 
-		//then whether write or poll, we roll into returning the updated out object		
+		//lambda function to generate output. use &vs to save creating a copy of vs on every call
+		auto localHelperOutput = [pins](VIRTUALSERVO &vs) {
+			// Add a "pin" object
+			const std::string devType[6] = { "Servo","Aspect","MAS","SensorW","Sensor","I2C" };
+			const std::string servoState[13] = { "Neutral","x","Thrown","x","Closed","x","Thrown","Closed","MAS","High","Low","x","x" };
 
-
-		// Create the "pins" array inside the main object
-		JsonArray pins = out["pins"].to<JsonArray>();
-
-		using namespace nsESPaccessory;
-
-		//Need to create lambda function and then call it with the appropriate bank
-		
-		for (auto &vs : virtualservoCollection) {
-			// Add the first pin object
 			JsonObject pin = pins.add<JsonObject>();
 			pin["mode"] = devType[vs.deviceType];
 			pin["pin"] = vs.pin;
@@ -502,7 +499,7 @@ void nsACCweb::startWebServices() {
 			//vs.aspectParameters is a 32 byte array. we convert it here to a hex string of 64 char
 			char buffer[70];
 			char* ptr = buffer;
-			for (int i = 0;i <sizeof(vs.aspectParameters);i++) {
+			for (int i = 0;i < sizeof(vs.aspectParameters);i++) {
 				//we know we are creating 2 chars with a trailling null
 				//and we know 70 chars is sufficient without need to track end of buffer, hence use 3
 				snprintf(ptr, 3, "%02X", vs.aspectParameters[i]);
@@ -510,7 +507,24 @@ void nsACCweb::startWebServices() {
 			}
 			pin["MASarray"] = buffer;
 
+			};//end lambda
+
+
+/*DO THE PROCESSING*/
+		if (doc["action"]=="write"){
+
+//		const char* v = doc["action"];
+	//	if (strcmp(v, "write") == 0) {
+			//use lambda
+			for (auto& vs : virtualservoCollection) { localHelperInput(vs); }
 		}
+
+		//then whether write or poll, we roll into returning the updated out object		
+
+
+
+		//call the lambda function
+		for (auto& vs : virtualservoCollection) { localHelperOutput(vs); }
 
 		sendJson(out);
 	}
