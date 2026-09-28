@@ -1,4 +1,9 @@
 # ESPaccessoryController
+2026-09-28 this is a fall back working version of web.cpp
+Am having problems with websocket for bank1, but this is because it has 16 entries and the buffer grows beyond 2k bytes which means it exceeds 2 tcp frames and 
+the esp crashes
+
+
 ESP based model railroad accessory controller supporting LocoNet
 2026-09-27 still work in progress
 
