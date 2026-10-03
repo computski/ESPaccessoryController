@@ -1,0 +1,5 @@
+# ESPaccessoryController build property overrides
+#
+compiler.cpp.extra_flags=-DWEBSOCKETS_MAX_DATA_SIZE=32768
+
+
