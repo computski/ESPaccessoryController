@@ -1,12 +1,12 @@
 ﻿<html xmlns="http://www.w3.org/1999/xhtml">
 <head>
 <meta charset="utf-8">
-    <title>ACC ESP - bank 0</title>
+    <title>ACC ESP - bank 1</title>
  	<meta name="viewport" content="width=device-width, initial-scale=1.0">
    
 <!-- wsUri is now given to us as a json variable via a call to /hardware-->
 
-    <!--updated 2026-09-27-->
+    <!--updated 2026-09-29-->
     <style>
         .outer {
             border: solid;
@@ -106,18 +106,23 @@ text-align:left;
     <script type="text/javascript">
       //let wsUri = "wss://echo.websocket.org/";  //test mode only
       let wsUri = "ws://192.168.6.1:12080/";
-      let ws;
+	let ws;
 
         //define JSON send-receive objects
 
-        const bankExample = { "page": "bank0", "action": "poll", pins:[
+        const bankExample = { "page": "bank1", "action": "poll", pins:[
 {"mode":"Servo","pin":0,"addr":0,"invert":false,"cont":false,"swing":25,"rate":0,"MASstate":127,"state":"x","MASarray":"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"},
-{"mode":"MAS","pin":1,"addr":33,"invert":false,"cont":false,"swing":45,"rate":0,"MASstate":127,"state":"Closed","MASarray":"0001020304050607A1A2A3A4A5A6A7a8B1B2B3B4B5B6B7B8C1C2C3C4C5C6C7C8"}]};
+{"mode":"MAS","pin":1,"addr":33,"invert":false,"cont":false,"swing":45,"rate":0,"MASstate":127,"state":"Closed","MASarray":"0001020304050607A1A2A3A4A5A6A7a8B1B2B3B4B5B6B7B8C1C2C3C4C5C6C7C8"}
 
-let bank = { page: "bank0", action: "poll", pins:[{pin:0},{pin:1},{pin:2},{pin:3},{pin:4},{pin:5},{pin:6},{pin:7},{pin:8},{pin:9}]};
-let bankWrite = { "page": "bank0", "action": "write", pins:[]};
+]};
+
+//js objects are synonymous with JSON but you don't need to use quotes around the object names
+let bankWrite =  { page: "bank1", action: "write", pins:[]};
+
+let bank = { page: "bank1", action: "poll", pins:[{pin:0},{pin:1},{pin:2},{pin:3},{pin:4},{pin:5},{pin:6},{pin:7},
+{pin:8},{pin:9},{pin:10},{pin:11},{pin:12},{pin:13},{pin:14},{pin:15}]};
+
 let hardware = {"wsUri":"ws://192.168.6.1:81/"};
-
         //if action=fail this indicates the changes were not successful and the current settings are returned
 
       //****** common routine
@@ -208,35 +213,19 @@ let hardware = {"wsUri":"ws://192.168.6.1:81/"};
 try{
 	//console.log(evt.data);
   	const ubank = JSON.parse(evt.data);
-        console.log(ubank);
-	//merge data into bank
-        bank.pins = bank.pins.map(existingItem => {
- 	let match = ubank.pins.find(newItem => newItem.pin === existingItem.pin);
-  	// Merge existing properties with updated properties using spread syntax
-  	return match ? { ...existingItem, ...match } : existingItem;
-	});
+	console.log(ubank);
+	bank.pins = bank.pins.map(existingItem => {
+ let match = ubank.pins.find(newItem => newItem.pin === existingItem.pin);
+  // Merge existing properties with updated properties using spread syntax
+  return match ? { ...existingItem, ...match } : existingItem;
+});
 
-	repaintUI();
+         repaintUI();
 
 }catch(e){
 if (console) console.log("parse error");
 }
         }
-
-
-
-/*
-repaint a row where the row index is 0 based and corresponds to the pin number.
-therefore if we receive a new bank object with "pin":5 for example we need to call this with 
-tablerow, bankpin.
-OR 
-Ah, but big problem here is changing device types etc, because its assumed that the full bank object exists in memory
-on the browser so that we can mask/unmask fields as required.
-
-We are going to have to shrink the JSON doc
-
-
-*/
 
 
 
@@ -264,38 +253,16 @@ inputs[r].innerText=bank.pins[r].pin;
 inputs = document.getElementsByName('mode[]');
 inputs[r].value=bank.pins[r].mode;  //default behaviour but overriden in switch
 
+//bank1 and 2 only support Servo,Aspect and MAS
 switch (bank.pins[r].mode)
 {
-case "I2C":
-	isSystem=true;
-	//set a single value and disable dropdown
-	inputs[r].length = 0;
-	const newOption = document.createElement("option");
-	newOption.text=bank.pins[r].mode;
-	newOption.value=bank.pins[r].mode;
-	inputs[r].appendChild(newOption);
-	inputs[r].disabled=true;
-	break;
-
 case "Servo":
-	//special case pin 0, Servo is actually Heartbeat which isSystem
-	isSystem = r==0?true:false;
-	isServo = r==0?false:true;
-
+	isServo = true;
 	break;
 
 case "MAS":
 	isMAS=true;
 	break;
-
-case "Sensor":
-case "SensorW":
-	//special case pin 9, is always a Sensor, really we want to remove the other options
-	if (r!=9) break;
-	inputs[r].querySelector('[value="MAS"]')?.remove();
-	inputs[r].querySelector('[value="Servo"]')?.remove();
-	//inputs[r].querySelector('[value="SensorW"]')?.remove();  //don't remove this. server will take care of it
-	inputs[r].querySelector('[value="Aspect"]')?.remove();
 }
 
 
@@ -378,11 +345,14 @@ function encodeMAS(txt){
 
 
         function repaintUI() {
+//need to modify this to accept partial updates to bank object and then update the table
+
+
 
         try {
    	document.getElementById("btnSave").classList.remove('on');
 		
-	if (bank.page!="bank0") return;
+	if (bank.page!="bank1") return;
 	if (console) console.log("repaintUI");
 	for (r=0;r<bank.pins.length;r++){repaintRow(r);}
 	return;
@@ -414,17 +384,20 @@ function encodeMAS(txt){
 ////////////////	WRITE WRITE WRITE //////////////
         function setBank(action) {
 //do no validation on client.  the changes are sent up to the server and it does validation
+//we send the bankWrite JSON object to the server
 
 if (action=="write"){
-//copy data to bankWrite and send this
 	bankWrite.action="write";
+	//copy data from entire table, however only those rows flagged with dirty=true will be processed by server
 		for (r=0;r<bank.pins.length;r++){
+		
 		//if a row logged a change, the event causes the creation of the corresponding pin entry in bankWrite
 		//and we update it here
 			
+		//const hasPair = bankWrite.pins.some(obj => obj.pin === 3);
 		const foundObj = bankWrite.pins.find(obj => obj.pin === r);
 		if (foundObj === undefined) continue;
-
+		
 		var inputs = document.getElementsByName('mode[]');
 		foundObj.mode=inputs[r].value;
 
@@ -454,15 +427,18 @@ if (action=="write"){
 
 		foundObj.MASarray=arr;
 		}
- 	
 	}
 else
-	{bankWrite.action="poll";
-	bankWrite.pins=[];
-	}
-const myJSON = JSON.stringify(bankWrite);
+{bankWrite.action="poll";
+//clear the pins array
+bankWrite.pins=[];}
+
+console.log(bankWrite);
+
+        var myJSON = JSON.stringify(bankWrite);
 	debug.innerText=myJSON;
 	ws.send(myJSON);
+
 //clear the .pins array once written
 bankWrite.pins=[];
 }
@@ -477,8 +453,8 @@ function scooby(){
 //ESP8266webserver has problems with files >21kb.  So we will build the table onload
 const table = document.getElementById('table1');
 const tbody = table.querySelector("tbody") || table;
-const sourceRow = tbody.rows[1];
-for (i=0;i<8;i++){
+const sourceRow = tbody.rows[0];
+for (i=0;i<15;i++){
 const clonedRow = sourceRow.cloneNode(true);
 tbody.appendChild(clonedRow);
 }
@@ -496,26 +472,22 @@ table.addEventListener('input', (event) => {
         
         // Add a visual indicator or tracking attribute
          document.getElementById("btnSave").classList.add('on');
-
+	
 	//Add the pin to bankWrite (once) if not present, this denotes a pending write
 	const p =cell.parentNode.rowIndex-1;
 	const s  = '{"pin":' + p + '}';
 	const hasPair= bankWrite.pins.some(obj => obj.pin === p );    
 	if (!hasPair) bankWrite.pins.push(JSON.parse(s));
 
-if (cell.cellIndex==0) {
-//special case for mode column, update the bank JSON object and repaint this row
-bank.pins[cell.parentNode.rowIndex-1].mode=event.target.value;
-repaintRow(cell.parentNode.rowIndex-1);
-}
-
-
+	if (cell.cellIndex==0) {
+	//special case for mode column, update the bank JSON object and repaint this row
+	bank.pins[cell.parentNode.rowIndex-1].mode=event.target.value;
+	repaintRow(cell.parentNode.rowIndex-1);
+    	}
     }
 });
 
-
 return;
-
 }
 
     </script>
@@ -525,8 +497,8 @@ return;
 
 <body onload="scooby();boot()">
 <div class="button-container">
-<input type="button" value="Bank 0 " class="tabSel"  onclick="debug.classList.toggle('nominal');"/>
-<input type="button" value=" Bank 1 " class="tab"  onclick="window.location.href='bank1.htm';"/>
+<input type="button" value="Bank 0 " class="tab"  onclick="window.location.href='bank0.htm';"/>
+<input type="button" value=" Bank 1 " class="tabSel"  onclick="debug.classList.toggle('nominal');"/>
 <input type="button" value="  Bank 2  " class="tab"  onclick="window.location.href='bank2.htm';"/>
 <input type="button" value=" Hardware " class="tab"  onclick="window.location.href='hardware.htm';"/>
 </div>
@@ -557,35 +529,7 @@ return;
 <tbody>
 <tr>
 <td><select name="mode[]">
-<!--pin 0 servo option is actually heartbeat-->
-<option value="Servo">Heartbeat</option>
-<option value="Sensor">Sensor</option>
-<option value="SensorW">Sensor WPU</option>
-<option value="Aspect">Aspect</option>
-<option value="MAS">MAS</option>
-</select>
-</td>
-<td name="pin[]"></td>
-<td><input type="text" name="addr[]"/></td>
-<td><input type="text" name="swing[]"/></td>
-<td><input type="checkbox" name="invert[]"/></td>
-
-<td><input type="checkbox" name="cont[]"/></td>
-<td><input type="text" name="rate[]"/></td>
-
-<td><input type="text" name="MASh[]" style="width: 8vw"/></td>
-<td><input type="text" name="MASl[]" style="width: 8vw"/></td>
-<td><input type="text" name="MAShF[]" style="width: 8vw"/></td>
-<td><input type="text" name="MASlF[]" style="width: 8vw"/></td>
-
-<td name="state[]"></td>
-</tr>
-
-<tr>
-<td><select name="mode[]">
 <option value="Servo">Servo</option>
-<option value="Sensor">Sensor</option>
-<option value="SensorW">Sensor WPU</option>
 <option value="Aspect">Aspect</option>
 <option value="MAS">MAS</option>
 </select>
@@ -594,6 +538,7 @@ return;
 <td><input type="text" name="addr[]"/></td>
 <td><input type="text" name="swing[]"/></td>
 <td><input type="checkbox" name="invert[]"/></td>
+
 <td><input type="checkbox" name="cont[]"/></td>
 <td><input type="text" name="rate[]"/></td>
 
@@ -627,8 +572,8 @@ style="padding-top:1vw;
        
         <br />
         <p id="debug" style="font-size:2vmin" class="nominal">debug </p>
-Bank 0. These pins are hosted on the ESP8266 device.</br>
-Pin 0 cannot support servo mode but can be used in other modes.</br>
+Bank 1. These pins are hosted on a PCA device.</br>
+The PCA can only </br>
 Pin 9 is represents the A0 analog input.
 
     </div>
