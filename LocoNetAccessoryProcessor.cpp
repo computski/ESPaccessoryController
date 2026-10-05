@@ -14,46 +14,10 @@
 
 #include "LocoNetAccessoryProcessor.h"
 #include "ESPaccessory.h"
-
+#include "ACCweb.h"
 using namespace nsLOCONETaccessoryProcessor;
 
-/*
-void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, void* data, size_t len) {
-	//trace(Serial.printf("\nLOCOnet %s \n", client->remoteIP().toString().c_str());)
-		//malloc gives more efficient memory usage than a fixed buffer - remember to use free
-		char* buffer;
-	buffer = (char*)malloc(len + 1);
-	//incoming *data was void, need to cast to const char
-	strncpy(buffer, (const char*)data, len);
-	buffer[len] = '\0';  //terminate with a null
-	
 
-	//it appears incoming messages may include SEND-space as a prefix and cr multiple times over in 
-	//a single message.  Use SEND-space as a token separator.  Look ahead through buffer to find all tokens
-	char* ptr = strstr(buffer, "SEND ");
-	char* ptrNext;
-
-	while (ptr != nullptr) {
-		ptrNext = strstr(ptr + 5, "SEND ");
-
-		if (ptrNext != nullptr) {
-			//sneaky; temporarily put a null terminator at ptrNext position
-			//so that we don't send the entire rest of string
-			ptrNext[0] = '\0';
-			tokenProcessor(ptr + 5, client,true);  //send part after "SEND "
-			ptrNext[0] = 'S';  //revert to S
-		}
-		else {
-			//last token
-			tokenProcessor(ptr + 5, client,true);  //send part after "SEND "
-			break;
-		}
-		ptr = ptrNext;
-	}
-
-	free(buffer);
-}
-*/
 
 void nsLOCONETaccessoryProcessor::handleLocoNet(void* arg, AsyncClient* client, void* data, size_t len) {
 	//trace(Serial.printf("\nLOCOnet %s \n", client->remoteIP().toString().c_str());)
@@ -234,6 +198,8 @@ this <B1> opcode encodes current OUTPUT levels
 					sensorEvent(addr, nsESPaccessory::getSensorState(addr));
 					//sensorEvent queues a message in the buffer if the sensor exists on this device
 
+					
+
 /*2026-08-08
 ok so as a host this works. if you poll sensor 19 from JRMI, this host will echo the message as SENT OK but will
 not generate a final RECEIVE state message if the device 19 is not present on this host.  meanwhile JRMI will broadcast
@@ -356,7 +322,7 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 }
 
 /// <summary>
-/// declare a sensor event as a loconet message
+/// declare a sensor event as a loconet message, and trigger a state update to the websocket clients.
 /// </summary>
 /// <param name="event">event state we are declaring with -1 meaning no sensor found </param>
 void nsLOCONETaccessoryProcessor::sensorEvent(uint16_t address,int8_t event) {
@@ -401,7 +367,13 @@ this <B1> opcode encodes current OUTPUT levels
 		//Loconet CLIENT declares async events as SEND
 		snprintf(buf, 25, "SEND %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
 	}
-	nsESPaccessory::queueMessage(buf);
+	
+	//only send a loconet message if address is non zero.
+	if (address > 0) nsESPaccessory::queueMessage(buf);
+	
+	//report the sensor state to the websocket so that any web clients can update their display
+	//this includes sensors with no-set zero dcc addresses.
+	nsACCweb::sendState();
 
 }
 

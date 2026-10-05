@@ -1,5 +1,21 @@
 
 /*
+* 2026-10-5 status, given that we built a web page interface
+* >seems that if unit cannot connect to LocoNet, it retries too rapidly and causes a WDT reset.  We need to slow down the retry rate.
+* >its not clear how we enable/disable I2C from web.
+* >there is no means to command a pin from web.
+* >there is no means to emulate a DCC command from web. BE and BX enable/disables this via serial at present.
+* note: if we have a web dropdown to enable/disable I2C, we need a means to show when I2C was auto disabled due to comms failure.
+* its really a case of enabled-but-not-working.  We need to show this on the web page. Do this as I2C status=ok|fail|disabled
+* thing is i think we just override the bootController.hasPCA9685modules flag to false if we have a comms failure.
+* we'd have to check the underlying boot?? object for original value.
+* NO: KISS.  if the I2C comms check fails, it overrides the bootController.hasPCA9685modules flag to false.  
+* if user then saves some other setting, it will save the hasPCA9685modules flag as false.  
+* i.e. it overrides the original user setting, which is ok because there is a hardware problem which user needs to fix.
+* Actually i think we need a separate comms check global var denoting I2C is good.
+* 
+* >the unit does not fall back to local AP mode if it cannot connect to the home wifi.  We need to implement this.  Was not a feature of the relay project.
+* 
 * 2026-08-08 bug. if you change SSID it fails to connect.  i think its adding unwanted chars...
 * its prob capturing a CRLF char on end that we don't want and we also need to skip thro the leading spaces
 * 
@@ -7,7 +23,7 @@
 * whereas client needs to respond to RECEIVE (e.g. turnout) and issue SEND for sensor events
 * 
 * 
-* 2027-07-27 bugs
+* 2026-07-27 bugs
 * boots, but only bank 0 through to pin 8.
 * Does not state the I2C is working.  That's because you need to set BE. by default I2C is disabled
 * You need to be able to program pin 9 as a sensor pin and give it a dcc address. also, if it is addr 0 default then it should not send messages
@@ -110,6 +126,7 @@ on the PCA9685 device it will be pins 0-15
 
 #include "ESPaccessory.h"
 #include "ESPservo.h"
+#include "ACCweb.h"
 #include <stdint.h>
 #include <Wire.h>
 
@@ -121,7 +138,7 @@ const uint8_t NodeMCUmap[9] = {16,5,4,0,2,14,12,13,15};
 void processServo(void);
 
 
-#define nTRACE
+#define TRACE
 
 #ifndef TRACE
 #define trace(traceCodeBlock) ;
@@ -132,34 +149,14 @@ void processServo(void);
 //Debug testing. Used to measure the execution time within processServo(). This is called every 15mS and must
 //comfortably complete execution within this period before the next call. sync pulse is on D8
 //disable by renaming nSYNC_PULSE
-#define SYNC_PULSE
+#define nSYNC_PULSE
 
 
 using namespace nsESPaccessory;
 
 //version control and capture of some system defaults for new compilations
 ///note, IP addresses are stored as a string to allow more easy editing in a web window or serial
-/*
-struct CONTROLLER
-{
-	long softwareVersion = 20260807;  //yyyymmdd captured as an integer
-	char AP_SSID[21] = "ACC_ESP";   //local SSID when operating as a stand alone LocoNet server
-	char AP_pwd[21] = "";
-	char AP_IP[17] = "192.168.6.2\0";   //local IP when acting as stand alone LocoNet server
-	char STA_SSID[21] = "Ossonet\0";  //SSID when running as a station on an external WiFi network
-	char STA_pwd[21] = "1122334455\0";//pwd for station
-	char tcpIP[17] = "192.168.1.121\0";   //when acting as a client, target IP to connect to
-	uint16_t tcpPort = 1234;       //when acting as a client or server, the tcp port
-	char Mode = 'S';  //C denotes client, S server and L as standalone wifi server
-	bool hasPCA9685modules = false; //denotes PCA modules are present
-	uint16_t PCAservoMin = 150;
-	uint16_t PCAservoMax = 600;
-	char MDNS[17] = "ACC_ESP\0";  //mDNS name
-	bool isDirty = false;  //will be true if EEPROM needs to be written
-};
 
-CONTROLLER bootController;
-*/
 
 
 uint8_t bankSelect = 0;
@@ -206,74 +203,12 @@ static os_timer_t payloadTimer;
 
 
 
-//++++++++++++++++++++ TURNOUTS, SIGNALS AND SENSORS ++++++++++++++++++++++++++++++++++++++++++++++
-/*hese two moved to header
-//#define ASPECT_PARAMETER_SIZE	8	//# of parameters in each MAS parameter array
-//#define MAS_EMPTY_VAL 255			//char which denotes a MAS parameter is not-set
-
-
-enum DEVICE_TYPES : uint8_t{
-	DEVICE_SERVO,
-	DEVICE_ASPECT,
-	DEVICE_MAS,
-	DEVICE_SENSOR,
-	DEVICE_SENSOR_WPU,
-	DEVICE_I2C
-};
-*/
 
 
 bool MAScommandSync;
 
 /*servo control.  VIRTUALSERVO is each virtualised device with its params.  Commanded over serial for testing
 or DCC in normal operation. VIRTUALSERVO objects support both mechanical servos and LED aspect signals */
-
-/*move to header
-enum SERVOSTATE : uint8_t{
-	SERVO_NEUTRAL,
-	SERVO_TO_THROWN,
-	SERVO_THROWN,
-	SERVO_TO_CLOSED,
-	SERVO_CLOSED,
-	SERVO_BOOT,
-	ASPECT_THROWN,
-	ASPECT_CLOSED,
-	ASPECT_MULTIPLE,
-	SENSOR_HIGH,
-	SENSOR_LOW,
-	HEARTBEAT_LOW,
-	HEARTBEAT_HIGH
-};
-*/
-
-/*move this to header
-struct VIRTUALSERVO {
-	uint8_t bank;
-	uint8_t pin;
-	uint16_t address;
-	uint8_t swing;
-	bool invert;
-	bool continuous;
-	bool power;
-	bool ignorePowerParameter;
-	DEVICE_TYPES deviceType;
-	SERVOSTATE state;
-	uint8_t position;  //0-180 degrees
-	int8_t rate;  //+ve values speed up movement, -ve slow it down
-	int8_t timeDelay;  //working register, loaded negative and counts up to zero
-	uint8_t aspectParameters[ASPECT_PARAMETER_SIZE * 4];
-	uint8_t MASstate;  //Multiple Aspect Signal commanded state
-};
-*/
-
-//virtual servo objects, there are 10 in Bank 0 (the ESP12, but we use pin 9 as a proxy for the A0 pin) and then 16 in each of Bank 1 and 2 which are PCA drivers
-//2026-09-23 moved to .h and made inline
-
-/*
-VIRTUALSERVO virtualservoCollection[10];
-VIRTUALSERVO virtualservoCollectionBank1[16];
-VIRTUALSERVO virtualservoCollectionBank2[16];
-*/
 
 Adafruit_PWMServoDriver PCAbank1 = Adafruit_PWMServoDriver(0x40);
 Adafruit_PWMServoDriver PCAbank2 = Adafruit_PWMServoDriver(0x41);
@@ -808,35 +743,6 @@ void checkSerial(void) {
 			//replaceAll(s, "\n", "<br/>\n");  //can replace cr with <br/>
 			Serial.println(s.c_str());
 
-			/*
-			//wifi and IP configs
-			Serial.printf("\nSoftware ver %d\n", bootController.softwareVersion);
-			Serial.print("MAC ");
-			Serial.println(WiFi.macAddress());  // %s in printf does not work
-			Serial.printf("mDNS name %s\n", bootController.MDNS);
-
-			switch (bootController.Mode) {
-			case 'S':
-				Serial.printf("Network SSID %s\n", bootController.STA_SSID);
-				Serial.println(F("Running as LocoNet HOST"));
-				Serial.print(F("Loconet server IP "));
-				Serial.println(WiFi.localIP().toString());
-				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
-				break;
-			case 'L':
-				Serial.println(F("Running as standalone LocoNet HOST"));
-				Serial.printf("SSID %s\n", bootController.AP_SSID);
-				Serial.print(F("LocoNet server IP "));
-				Serial.println(WiFi.softAPIP().toString());
-				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
-				break;
-			case  'C':
-				Serial.printf("Network SSID %s\n", bootController.STA_SSID);
-				Serial.println(F("Running as LocoNet CLIENT"));
-				Serial.printf("Loconet server IP %s\n", bootController.tcpIP);
-				Serial.printf("Loconet port %d\n\n", bootController.tcpPort);
-			}
-			*/
 			prompt();
 			Serial.printf("PCA min %d\n", bootController.PCAservoMin);
 			Serial.printf("PCA max %d\n", bootController.PCAservoMax);
@@ -2193,8 +2099,10 @@ uint8_t assertMASoutput(VIRTUALSERVO vs, uint8_t bank) {
 
 void nsESPaccessory::commandTurnout(int16_t addr, bool thrown) {
 	//find all aspects and servos with addr, and assert thrown state
-	for (auto& vs : virtualservoCollection) {
-		if (vs.address != addr) continue;
+	//do this across all virctualservoCollection arrays
+	
+	auto localHelper = [addr,thrown](VIRTUALSERVO& vs) {
+		if (vs.address != addr) return;
 		switch (vs.deviceType) {
 		case DEVICE_SERVO:
 			vs.state = thrown ? SERVO_TO_THROWN : SERVO_TO_CLOSED;
@@ -2203,7 +2111,12 @@ void nsESPaccessory::commandTurnout(int16_t addr, bool thrown) {
 			vs.state = thrown ? ASPECT_THROWN : ASPECT_CLOSED;
 			break;
 		}
-	}
+		};
+
+	for (auto& vs : virtualservoCollection) { localHelper(vs); }
+	for (auto& vs : virtualservoCollectionBank1) { localHelper(vs); }
+	for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
+
 	if (verbose) {
 		Serial.printf("address %d ", addr);
 		if (thrown) {
@@ -2213,16 +2126,26 @@ void nsESPaccessory::commandTurnout(int16_t addr, bool thrown) {
 			Serial.println("closed");
 		}
 	}
+	//send the new state to the websocket clients
+	nsACCweb::sendState();
 }
 
 void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {
 	//find all MAS with addr, and assert new state
-	for (auto& vs : virtualservoCollection) {
-		if (vs.address != addr) continue;
-		if (vs.deviceType != DEVICE_MAS) continue;
+	//do this across all virctualservoCollection arrays
+	auto localHelper = [addr, state](VIRTUALSERVO& vs) {
+		if (vs.address != addr) return;
+		if (vs.deviceType != DEVICE_MAS) return;
 		//set the new state, processServo() will act on this
 		vs.MASstate = state;
-	}
+		};
+
+	for (auto& vs : virtualservoCollection) { localHelper(vs); }
+	for (auto& vs : virtualservoCollectionBank1) { localHelper(vs); }
+	for (auto& vs : virtualservoCollectionBank2) { localHelper(vs); }
+	//send the new state to the websocket clients
+	nsACCweb::sendState();
+
 }
 
 
@@ -2232,10 +2155,13 @@ void nsESPaccessory::commandMAS(int16_t addr, uint8_t state) {
 /// <param name="addr">dcc address of sensor</param>
 /// <returns>-1 if device not exists, and literal 1:0 state if device does exist</returns>
 int8_t nsESPaccessory::getSensorState(int16_t addr) {
+	//Sensors can only exist in bank0, because Bank1 and Bank2 are PCA modules.
+	//This routine does not report if the state has changed
 	for (auto vs : virtualservoCollection) {
 		if (vs.address != addr) continue;
 		if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) continue;
-		return vs.state == SENSOR_LOW ? false : true;
+		bool returnState = vs.state == SENSOR_LOW ? false : true;
+		return vs.invert ? !returnState : returnState;
 	}
 	return -1;
 }
@@ -2394,7 +2320,7 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 /// </summary>
 void eeGetSettings(void) {
 	CONTROLLER defaultController;  //grab defaults
-	EEPROM.begin(2200);  //ESP does not have dedicated eeprom and must be allocated from Flash.  Need 2200 for 3 banks
+	EEPROM.begin(2400);  //ESP does not have dedicated eeprom and must be allocated from Flash.  Need 2400 for 3 banks
 	int eeAddr = 0;
 	bool factory = false;
 	EEPROM.get(eeAddr, bootController);
@@ -2464,6 +2390,7 @@ void eeGetSettings(void) {
 /// </summary>
 
 void  nsESPaccessory::eePutSettings(void) {
+	Serial.println("eePut entry");
 	if (bootController.isDirty == false) { return; }
 	int eeAddr = 0;
 	EEPROM.put(eeAddr, bootController);
@@ -2650,6 +2577,8 @@ void processServoOLD(void) {
 		case SENSOR_LOW:
 			//for sensors we repurpose the position parameter to record the input state every 15ms
 			//and this in turn is used to debounce the input 8 zeros or 1s must be seen
+			//vs.invert is used to invert the state BEFORE it is stored.
+
 			if ((vs.deviceType != DEVICE_SENSOR) && (vs.deviceType != DEVICE_SENSOR_WPU)) break;
 			vs.position = vs.position << 1;
 			if (vs.pin == 9) {
@@ -2664,15 +2593,23 @@ void processServoOLD(void) {
 			//2026-04-21 found the sensor bug.  If you queue a TCP message before you are connected then this caused a crash
 			//this is now fixed in sendEnqueueMessages().  No need to suspend &servoTimer
 
-			if ((vs.state == SENSOR_HIGH) && (vs.position == 0)) {
-					//declare low
-					nsLOCONETaccessoryProcessor::sensorEvent(vs.address,false);
-					vs.state = SENSOR_LOW;
-			}
+			//remember that the state is stored after any inversion.  A valid currentState exists
+			//if we read vs.position==0 || 0xFF.
 
-			if ((vs.state == SENSOR_LOW) && (vs.position == 0xFF)){
-					nsLOCONETaccessoryProcessor::sensorEvent(vs.address, true);
+			if (vs.position ==0 || vs.position ==0xFF) {
+				//we have a valid current state, and deal with inversion.
+				bool currentState = vs.position == 0x00 ? vs.invert : !vs.invert;
+				//is this a change from the last recorded state?
+				if ((vs.state == SENSOR_HIGH) && (!currentState)) {
+					//declare low
+					vs.state = SENSOR_LOW;
+					nsLOCONETaccessoryProcessor::sensorEvent(vs.address, false);
+				}
+
+				if ((vs.state == SENSOR_LOW) && (currentState)) {
 					vs.state = SENSOR_HIGH;
+					nsLOCONETaccessoryProcessor::sensorEvent(vs.address, true);
+				}
 			}
 			break;
 
@@ -3052,7 +2989,7 @@ void processServo(void) {
 		switch (vs.state) {
 		case SERVO_NEUTRAL:
 			vs.position = 90;
-			if (activeBank==0) {ESPservoAttach(vs.pin, true);}
+			if (0==activeBank) {ESPservoAttach(vs.pin, true);}
 			else { PCAservoWrite(&vs, activeBank, true);}
 			break;
 
@@ -3074,7 +3011,7 @@ void processServo(void) {
 				vs.state = SERVO_CLOSED;
 			}
 
-			if (activeBank == 0) { ESPservoAttach(vs.pin, true); }
+			if (0==activeBank ) { ESPservoAttach(vs.pin, true); }
 			else { PCAservoWrite(&vs, activeBank, true); }
 			break;
 
@@ -3213,7 +3150,6 @@ void processServo(void) {
 			vs.state = HEARTBEAT_HIGH;
 			break;
 
-			//about to go to dinner... yet to PCA this
 		case SERVO_BOOT:
 			if (vsBoot == nullptr) {
 				//handle next-up servo to boot. servos are booted in the CLOSED position	
@@ -3252,9 +3188,10 @@ void processServo(void) {
 					break;
 
 				case DEVICE_SERVO:
-					//special case for pin0. This cannot operate as a servo so instead make it a heartbeat indicator
-					if (vs.pin == 0) {
-						vs.state = HEARTBEAT_HIGH;   //DEBUG DISABLE
+					//special case for pin0 on Bank0. This cannot operate as a servo so instead make it a heartbeat indicator
+		
+					if ((0==activeBank) && (0==vs.pin)) {
+						vs.state = HEARTBEAT_HIGH;   
 						pinMode(gpioPin, OUTPUT);
 						vsBoot = nullptr;
 						bootTimer = 0;
@@ -3262,7 +3199,7 @@ void processServo(void) {
 					}
 					vs.timeDelay = 0;
 					vs.position = vs.invert ? maxPosition : minPosition;
-					if (activeBank == 0) {
+					if (0==activeBank) {
 						ESPservoAttach(vs.pin, true);
 						ESPservoWrite(vs.pin, vs.position);
 					}
@@ -3279,7 +3216,7 @@ void processServo(void) {
 					vs.state = vs.deviceType == DEVICE_MAS ? ASPECT_MULTIPLE : ASPECT_CLOSED;
 					vsBoot = nullptr;
 					bootTimer = 0;
-					if (activeBank==0) ESPservoAttach(vs.pin, false);
+					if (0==activeBank) ESPservoAttach(vs.pin, false);
 					break;
 				case DEVICE_I2C:
 					vsBoot = nullptr;
@@ -3295,7 +3232,7 @@ void processServo(void) {
 				bootTimer -= bootTimer > 0 ? 1 : 0;
 				//timed out?	
 				if (bootTimer == 0) {
-					vs.state = SERVO_CLOSED;
+					vs.state = SERVO_CLOSED;   //2026-10-04 what if its not a servo?  say its mas or a sensor?
 					//detach if !vs.continuous
 					if (activeBank!=0) PCAservoWrite(&vs, activeBank, vs.continuous);
 					Serial.print(F("pin booted "));
@@ -3322,7 +3259,6 @@ void processServo(void) {
 
 
 		};  //end lambda
-
 
 
 

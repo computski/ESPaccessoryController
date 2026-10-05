@@ -79,7 +79,7 @@ namespace nsESPaccessory {
 	
 	struct CONTROLLER
 	{
-		long softwareVersion = 20260807;  //yyyymmdd captured as an integer
+		long softwareVersion = 20261004;  //yyyymmdd captured as an integer
 		char AP_SSID[21] = "ACC_ESP";   //local SSID when operating as a stand alone LocoNet server
 		char AP_pwd[21] = "";
 		char AP_IP[17] = "192.168.6.2\0";   //local IP when acting as stand alone LocoNet server
