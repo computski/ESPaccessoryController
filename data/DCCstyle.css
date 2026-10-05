@@ -1,0 +1,107 @@
+﻿       .outer {
+            border: solid;
+	    border-top: none;
+            border-width: 1px;
+            padding-left: 2vw;
+        }
+
+     
+        .trip {
+            background-color: orangered;
+        }
+
+        .on {
+            background-color: lightgreen;
+        }
+
+        .nominal {
+            visibility: hidden;
+        }
+
+.shim {
+	padding-top:1vw;
+}
+        input[type=text] {
+            font-size: 2vmin;
+            width: 4vw;
+            padding: 0px 0px;
+            margin: 0px 0;
+            box-sizing: border-box;
+        }
+
+        input[type=button] {
+            width: 5vw;
+            font-size: 2vmin;
+        }
+
+	select{
+		width: 6vw;
+            font-size: 2vmin;
+	}
+
+	.wider{
+	text-width: 10vw;
+ 	background-color: lightgreen;
+	}
+
+	
+        BODY {
+            FONT-SIZE: 2vmin;
+            FONT-FAMILY: Verdana, Arial, Helvetica, sans-serif
+        }
+
+        p {
+            font-size: 2vmin;
+        }
+
+        table {
+            font-size: 2vmin;
+        }
+
+th {
+text-align:left;
+}
+
+.tabSel{
+  		background: none;
+		border: 1px solid black;
+  		border-bottom: none;
+  		padding: 0;
+  		font-weight: bold;
+		color: black;
+ 	 	cursor: pointer;
+		text-decoration: none; /* Removes default underline */
+	}
+
+	.tab{
+		background: none;
+		border: none;
+  		border-bottom: 1px solid black;
+  		padding: 0;
+  		font-weight: normal;
+  		cursor: pointer;
+		color: black;
+		text-decoration: none; /* Removes default underline */
+	}
+
+	.button-container {
+  		display: flex;       /* Activates layout engine */
+  		flex-direction: row; /* Aligns items horizontally */
+  		gap: 0px;           /* Puts clean spacing between the buttons */
+  		white-space: nowrap; /* Forces content to stay on one line */
+	}
+
+	.button-container::after {
+  	content: '';
+  	flex: 1; /* Grows to take up all remaining space */
+  	border-bottom: 1px solid black; /* Match your existing button border styling */
+	}
+
+	.tab-spacer {
+  		flex: 1; /* Grows to take up all remaining space */
+  		border-bottom: 1px solid black; 
+	} 
+
+/*if you don't want to put <span class="tab-spacer"></span> after the buttons, then ::after will do the same job*/
+
+

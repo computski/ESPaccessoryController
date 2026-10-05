@@ -1,5 +1,7 @@
 ﻿<html xmlns="http://www.w3.org/1999/xhtml">
 <head>
+<link rel="stylesheet" href="DCCstyle.css">
+
 <meta charset="utf-8">
     <title>ACC ESP - bank 1</title>
  	<meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,105 +9,10 @@
 <!-- wsUri is now given to us as a json variable via a call to /hardware-->
 
     <!--updated 2026-09-29-->
-    <style>
-        .outer {
-            border: solid;
-	    border-top: none;
-            border-width: 1px;
-            padding-left: 2vw;
-        }
-
-     
-        .trip {
-            background-color: orangered;
-        }
-
-        .on {
-            background-color: lightgreen;
-        }
-
-        .nominal {
-            visibility: hidden;
-        }
-
-.shim {
-	padding-top:1vw;
-}
-        input[type=text] {
-            font-size: 2vmin;
-            width: 4vw;
-            padding: 0px 0px;
-            margin: 0px 0;
-            box-sizing: border-box;
-        }
-
-        input[type=button] {
-            width: 5vw;
-            font-size: 2vmin;
-        }
-
-	select{
-		width: 6vw;
-            font-size: 2vmin;
-	}
-
-	.wider{
-	text-width: 10vw;
- 	background-color: lightgreen;
-	}
-
-	
-        BODY {
-            FONT-SIZE: 2vmin;
-            FONT-FAMILY: Verdana, Arial, Helvetica, sans-serif
-        }
-
-        p {
-            font-size: 2vmin;
-        }
-
-        table {
-            font-size: 2vmin;
-        }
-
-th {
-text-align:left;
-}
-
-.tabSel{
-  		background: none;
-		border: 1px solid black;
-  		border-bottom: none;
-  		padding: 0;
-  		font-weight: bold;
-		color: black;
- 	 	cursor: pointer;
-		text-decoration: none; /* Removes default underline */
-	}
-
-	.tab{
-		background: none;
-		border: none;
-  		border-bottom: 1px solid black;
-  		padding: 0;
-  		font-weight: normal;
-  		cursor: pointer;
-		color: black;
-		text-decoration: none; /* Removes default underline */
-	}
-
-	.button-container {
-  		display: flex;       /* Activates layout engine */
-  		flex-direction: row; /* Aligns items horizontally */
-  		gap: 0px;           /* Puts clean spacing between the buttons */
-  		white-space: nowrap; /* Forces content to stay on one line */
-	}
-
-    </style>
 
     <script type="text/javascript">
       //let wsUri = "wss://echo.websocket.org/";  //test mode only
-      let wsUri = "ws://192.168.6.1:12080/";
+      let wsUri = "ws://192.168.6.1/ws";
 	let ws;
 
         //define JSON send-receive objects
@@ -122,7 +29,7 @@ let bankWrite =  { page: "bank1", action: "write", pins:[]};
 let bank = { page: "bank1", action: "poll", pins:[{pin:0},{pin:1},{pin:2},{pin:3},{pin:4},{pin:5},{pin:6},{pin:7},
 {pin:8},{pin:9},{pin:10},{pin:11},{pin:12},{pin:13},{pin:14},{pin:15}]};
 
-let hardware = {"wsUri":"ws://192.168.6.1:81/"};
+let hardware = {"wsUri":"ws://192.168.6.1/ws"};
         //if action=fail this indicates the changes were not successful and the current settings are returned
 
       //****** common routine
@@ -214,6 +121,7 @@ try{
 	//console.log(evt.data);
   	const ubank = JSON.parse(evt.data);
 	console.log(ubank);
+	if (ubank.page!="bank1") return;
 	bank.pins = bank.pins.map(existingItem => {
  let match = ubank.pins.find(newItem => newItem.pin === existingItem.pin);
   // Merge existing properties with updated properties using spread syntax
@@ -352,7 +260,7 @@ function encodeMAS(txt){
         try {
    	document.getElementById("btnSave").classList.remove('on');
 		
-	if (bank.page!="bank1") return;
+	
 	if (console) console.log("repaintUI");
 	for (r=0;r<bank.pins.length;r++){repaintRow(r);}
 	return;
@@ -501,6 +409,7 @@ return;
 <input type="button" value=" Bank 1 " class="tabSel"  onclick="debug.classList.toggle('nominal');"/>
 <input type="button" value="  Bank 2  " class="tab"  onclick="window.location.href='bank2.htm';"/>
 <input type="button" value=" Hardware " class="tab"  onclick="window.location.href='hardware.htm';"/>
+<span class="tab-spacer"></span>
 </div>
 
     <div class="outer">

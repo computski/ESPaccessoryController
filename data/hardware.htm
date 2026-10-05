@@ -4,15 +4,12 @@
  	<meta name="viewport" content="width=device-width, initial-scale=1.0">
    
 <!-- wsUri is now given to us as a json variable off a call to /hardware
-var wsUri = "ws://192.168.6.1:81/";  
-//var wsUri = ws://echo.websocket.org
-
-
+ws://192.168.6.1/ws or for test  ws://echo.websocket.org
 -->
 
 
 
-    <!--updated 2026-09-17-->
+    <!--updated 2026-10-05-->
     <style>
         .outer {
             border: solid;
@@ -100,12 +97,12 @@ var wsUri = "ws://192.168.6.1:81/";
     </style>
 
     <script type="text/javascript">
-        //var wsUri = "wss://echo.websocket.org/";  //test
+       //var wsUri = "wss://echo.websocket.org/";  //test
        var wsUri = "ws://192.168.6.1:12080/";
 	var ws;
 
         //define send-receive objects
-        var hardware = { "page": "hardware", "action": "poll", "SSID": "DCC_02", "IP": "192.168.6.1", "MAC":"return of the", "pwd": "", "loconetPort": 4234,  "loconetIP":"192.168.1.1", "mDNS":"ACC_ESP", "STA_SSID":"none","STA_pwd":"none", "mode":"Client", "wsUri":"//192.168.6.1:12080/"};
+        var hardware = { "page": "hardware", "action": "poll", "SSID": "DCC_02", "IP": "192.168.6.1", "MAC":"return of the", "pwd": "", "loconetPort": 4234,  "loconetIP":"192.168.1.1", "mDNS":"ACC_ESP", "STA_SSID":"none","STA_pwd":"none", "mode":"Client", "wsUri":"//192.168.6.1/ws", "I2C":false};
         //if action=fail this indicates the changes were not successful and the current settings are returned
 
       //****** common routine
@@ -248,6 +245,7 @@ var wsUri = "ws://192.168.6.1:81/";
                  pwd.value = hardware.AP_pwd;
 		  mac.value = hardware.mac;
                  version.value = hardware.version;
+		PCA.value = hardware.I2C;  //case sensitive
 
 		STA_SSID.value = hardware.STA_SSID;
                 STA_pwd.value = hardware.STA_pwd;
@@ -330,6 +328,8 @@ var wsUri = "ws://192.168.6.1:81/";
 	hardware.mDNS = mDNS.value;
 	hardware.mode= mode.value;
 
+	hardware.I2C = PCA.value;
+
 	//if local validation fails, run a poll request instead
            hardware.action = isValid ? action: "poll";
 	
@@ -370,6 +370,9 @@ var wsUri = "ws://192.168.6.1:81/";
             <tr> <td>IP address</td><td><input type="text" id="ipAddr" /></td> </tr>
             <tr> <td>MAC</td><td><input type="text" id="mac" readonly /></td> </tr>
             <tr> <td>version</td><td><input type="text" id="version" readonly /></td> </tr>
+<tr> <td>Has PCA modules?</td><td><select id="PCA">
+<option value="true">Yes - I2C enabled</option>
+<option value="false">No - I2C disabled</option> </select> <td></tr>
 
             <tr> <td class="shim">Network SSID</td><td sclass="shim"><input type="text" id="STA_SSID" maxlength="18" /></td> </tr>
             <tr> <td>Network password</td><td><input type="text" id="STA_pwd" maxlength="18" /></td> </tr>
