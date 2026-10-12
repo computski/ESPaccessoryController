@@ -219,8 +219,8 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 		case OPC_SW_REQ:
 			/*Command a turnout.
 			<0xB0>,<SW1>,<SW2>,<CHK>
-			<SW1> =<0,A6,A5,A4- A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
-			<SW2> =<0,0,DIR,ON- A10,A9,A8,A7> Control bits and 4 MS adr bits.
+			<SW1> =<0,A6,A5,A4, A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
+			<SW2> =<0,0,DIR,ON, A10,A9,A8,A7> Control bits and 4 MS adr bits.
 			DIR=1 for Closed,/GREEN, =0 for Thrown/RED
 			ON=1 for Output ON, =0 FOR output OFF
 			Note-,Immediate response of <0xB4><30><00> if command failed, otherwise no response
@@ -230,10 +230,10 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 			*/
 
 			uint16_t addr = tokens[1];
-			addr += (tokens[2] & 0x0F) << 8;
+			addr += (tokens[2] & 0x0F) << 7; //bug fix 2026-10-8 we overshifted <<8
 			addr++;  //loconet address 0 is DCC address 1
 						
-			bool thrown = (tokens[2] & 0b00100000) == 0 ? true : false;
+			bool thrown = (tokens[2] &  0b00100000) == 0 ? true : false;
 			bool onState = (tokens[2] & 0b00010000) == 0 ? false : true;
 
 			if (nsESPaccessory::getVerbose) {
@@ -245,7 +245,6 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 					Serial.printf("Turnout %d closed\n", addr);
 				}
 			}
-
 
 			//only respond to the onState version of the command
 			if (onState) nsESPaccessory::commandTurnout(addr, thrown);
@@ -310,7 +309,7 @@ for say 2 sec after it raises an event, but this delay is cleared on sighting of
 				nsESPaccessory::commandMAS(addr, payload[2]);
 
 
-				//final respone is LACK=<B4>,<7D>,<7F>,<chk> if CMD ok
+				//final response is LACK=<B4>,<7D>,<7F>,<chk> if CMD ok
 		nsESPaccessory::queueMessage("RECEIVE 0xB4 0x7D 0x7F 0x49\n");
 		//should only transmit this if we are HOST
 
@@ -335,14 +334,14 @@ void nsLOCONETaccessoryProcessor::sensorEvent(uint16_t address,int8_t event) {
 
 
 /* <0xB2>,<SN1>,<SN2>,<CHK> SENSOR state REPORT  NO feedback
-<SN1> =<0,A6,A5,A4- A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
-<SN2> =<0,1,I,L- A10,A9,A8,A7> Report/status bits and 4 MS adr bits.
+<SN1> =<0,A6,A5,A4, A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
+<SN2> =<0,1,I,L, A10,A9,A8,A7> Report/status bits and 4 MS adr bits.
  this <B1> opcode encodes input levels for turnout feedback
 "I" =0 for "aux" inputs (normally not feedback), 1 for "switch" input used for turnout
 feedback for DS54 ouput/turnout # encoded by A0-A10
 "L" = 0 for this input 0V (LO), 1= this input > +6V (HI)
 alternately;
-<SN2> =<0,0,C,T- A10,A9,A8,A7>
+<SN2> =<0,0,C,T A10,A9,A8,A7>
 Report/status bits and 4 MS adr bits.
 this <B1> opcode encodes current OUTPUT levels
 "C"= 0 if "Closed" ouput line is OFF, 1="closed" output line is ON (sink current)
@@ -354,8 +353,8 @@ this <B1> opcode encodes current OUTPUT levels
 	address--; //DCC address space starts at 1, but its mapped to base zero for loconet transmissions
 	payload[1] = (address >> 1) & 0x7F;  //drop <0> by shifting right
 	payload[2] = (address >> 8); //use rshift 8 as we want address <15-8> in posn <7-0>
-	payload[2] += event ? 0b01010000 : 0b01000000;  //the event state maps to IN2<4>
-	payload[2] += (address & 0b1) << 5; //<0> of address maps to IN2<5>
+	payload[2] += event ? 0b01010000 : 0b01000000;  //the event state maps to SN2<4>
+	payload[2] += (address & 0b1) << 5; //<0> of address maps to SN2<5>
 	payload[3] = 0xFF ^ payload[2] ^ payload[1] ^ payload[0];
 	
 	char buf[25];
@@ -368,8 +367,7 @@ this <B1> opcode encodes current OUTPUT levels
 		snprintf(buf, 25, "SEND %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
 	}
 	
-	//only send a loconet message if address is non zero.
-	if (address > 0) nsESPaccessory::queueMessage(buf);
+	nsESPaccessory::queueMessage(buf);
 	
 	//report the sensor state to the websocket so that any web clients can update their display
 	//this includes sensors with no-set zero dcc addresses.
@@ -377,3 +375,47 @@ this <B1> opcode encodes current OUTPUT levels
 
 }
 
+/// <summary>
+/// Handles turnout events raised by the web interface, raising these to LocoNet
+/// </summary>
+/// <param name="address">turnout DCC address</param>
+/// <param name="event">c|t for closed|thrown</param>
+void nsLOCONETaccessoryProcessor::turnoutEvent(uint16_t address, bool isThrown){
+	if (nsESPaccessory::getVerbose()) {
+		Serial.printf("turnout event %d %d\n", address, isThrown);
+	};
+
+	/*Command a turnout.
+			<0xB0>,<SW1>,<SW2>,<CHK>
+			<SW1> =<0,A6,A5,A4, A3,A2,A1,A0>, 7 ls adr bits. A1,A0 select 1 of 4 input pairs in a DS54
+			<SW2> =<0,0,DIR,ON, A10,A9,A8,A7> Control bits and 4 MS adr bits.
+			DIR=1 for Closed,/GREEN, =0 for Thrown/RED
+			ON=1 for Output ON, =0 FOR output OFF
+			Note-,Immediate response of <0xB4><30><00> if command failed, otherwise no response
+
+			JRMI Panel Pro sends turnouts as 0-2047 which maps to 1-2048 in the 'real world'. It sends a turnout command twice.  First with power on, then with power off.
+			e.g. throw+poweron then throw+poweroff
+			
+	*/
+
+	uint8_t payload[4];
+	payload[0] = OPC_SW_REQ;
+	address--; //DCC address space starts at 1, but its mapped to base zero for loconet transmissions
+	payload[1] = address  & 0x7F;  //retain <7-0>
+	payload[2] = (address >> 7); //use rshift 7 as we want address <15-8> in posn <7-0>
+	payload[2] += isThrown ? 0b00010000 : 0b00110000;  //the event state maps to DIR<5>. ON<4> is always 1
+	payload[3] = 0xFF ^ payload[2] ^ payload[1] ^ payload[0];
+
+	char buf[25];
+	if (nsESPaccessory::isLoconetHost()) {
+		//Loconet HOST declares turnout events as RECEIVE
+		snprintf(buf, 25, "RECEIVE %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+	}
+	else {
+		//Loconet CLIENT declares events as SEND
+		snprintf(buf, 25, "SEND %02X %02X %02X %02X\n", payload[0], payload[1], payload[2], payload[3]);
+	}
+
+	nsESPaccessory::queueMessage(buf);
+
+}

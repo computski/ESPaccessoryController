@@ -38,6 +38,7 @@ namespace nsACCweb {
 	void processHardware(JsonDocument &doc);
 	void processBank(JsonDocument& doc);
 	void sendState(void);
+	void processCommand(JsonDocument& doc);
 	
 	std::string getWsUri();
 }

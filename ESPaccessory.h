@@ -79,12 +79,12 @@ namespace nsESPaccessory {
 	
 	struct CONTROLLER
 	{
-		long softwareVersion = 20261004;  //yyyymmdd captured as an integer
+		long softwareVersion = 20261012;  //yyyymmdd captured as an integer
 		char AP_SSID[21] = "ACC_ESP";   //local SSID when operating as a stand alone LocoNet server
 		char AP_pwd[21] = "";
 		char AP_IP[17] = "192.168.6.2\0";   //local IP when acting as stand alone LocoNet server
 		char STA_SSID[21] = "Ossonet\0";  //SSID when running as a station on an external WiFi network
-		char STA_pwd[21] = "1122334455\0";//pwd for station
+		char STA_pwd[21] = "11223344AA\0";//pwd for station
 		char tcpIP[17] = "192.168.1.121\0";   //when acting as a client, target IP to connect to
 		uint16_t tcpPort = 1234;       //when acting as a client or server, the tcp port
 		char Mode = 'S';  //C denotes client, S server and L as standalone wifi server
@@ -114,8 +114,8 @@ inline VIRTUALSERVO virtualservoCollectionBank2[16];
 	int8_t getSensorState(int16_t addr);
 	void dumpX(std::string& s);
 	void replaceAll(std::string& src, const std::string& from, const std::string& to);
-	
-
+	void setVirtualServoDefaults(void);
+	void bootVirtualServo(void);
 }
 
 #endif

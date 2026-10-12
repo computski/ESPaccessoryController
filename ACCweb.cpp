@@ -6,11 +6,9 @@
 #include "ESPaccessory.h"
 #include <ESP8266mDNS.h>
 
-/*ESP8266WebServer replaced with AsyncWebServer which is more robust.  The problem is that the ESP8266WebServer library has a bug in the streamFile() function 
+/*ESP8266WebServer replaced with AsyncWebServer which is more robust.  The ESP8266WebServer library has a bug in the streamFile() function 
 that causes it to fail when serving files larger than 21kb.  The AsyncWebServer library does not have this limitation and can serve larger files without issues.
 The AsyncWebServer library also has better performance and can handle multiple connections more efficiently.  It also handles content types automatically*/
-
-
 
 
 
@@ -20,6 +18,7 @@ using namespace nsACCweb;
 //create an instance of the AsyncWebServer class on port 80
 AsyncWebServer web(80);
 
+//the websocket is also on port 80 by default
 AsyncWebSocket ws("/ws");
 
 void handleFormSubmit(AsyncWebServerRequest* request) {
@@ -171,14 +170,22 @@ void nsACCweb::onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, A
 				return;
 			}
 			if (strcmp(sPage, "bank0") == 0 || strcmp(sPage, "bank1") == 0 || strcmp(sPage, "bank2") == 0) {
-				processBank(doc);
+				//valid actions are poll|write|read|command
+				if ("command" == doc["action"]){
+					processCommand(doc);
+				}else
+				{
+					processBank(doc);
+				}
 				return;
 			}
-			if (strcmp(sPage, "state") == 0) {
+		
+			if (strcmp(sPage, "state") == 0) {  //DEBUG - remove from prod
 				sendState();
 				return;
 			}
 		}
+
 		break;
 	}
 	case WS_EVT_PONG:
@@ -389,194 +396,8 @@ void nsACCweb::processHardware(JsonDocument& doc) {
 }
 
 
-/* MY OG CODE
 void nsACCweb::processBank(JsonDocument& doc) {
-	using namespace nsESPaccessory;
-	
-	//default response is a poll
-	JsonDocument out;
-	out["page"] = doc["page"];
-	out["action"] = "poll";
-	// Create the pins[] array inside the main object
-	JsonArray pins = out["pins"].to<JsonArray>();
-
-
-	//actions are poll|write
-		
-	//I come from the lambda down under.  Define a lambda routine to process changes passed up in [doc]
-	//note that the capture variable [doc] is by default read only.
-	
-	auto localHelperIn = [doc](VIRTUALSERVO& vs) {
-		bool fail = true;
-		VIRTUALSERVO vsParse=vs;
-
-		//Directly assign the array reference
-		//were passed [doc] as a const, so need to search it as const
-		JsonArrayConst pinsArray = doc["pins"];
-
-		//Loop through to find pin 0 using the modern V7 syntax
-		JsonObjectConst matchedPin;
-
-		for (JsonObjectConst item : pinsArray) {
-			// item["pin"].is<int>() checks if the key exists AND is an integer
-			if (item["pin"].is<int>() && item["pin"].as<int>() == vs.pin) {
-				matchedPin = item;
-				break;
-			}
-		}
-
-		//exit now if no match
-		if (matchedPin.isNull()) return;
-		
-		//copy data from matchedPin to vsParse and if validation is good, write this back to vs
-		//Parse device-specific fields
-	
-		if ( "Servo"== matchedPin["mode"]) {
-			//servo specific fields	
-			vsParse.deviceType = DEVICE_SERVO;
-			uint8_t swing = matchedPin["swing"];
-			if (swing < 91) { vsParse.swing = swing;fail = false; }
-
-			int8_t rate = matchedPin["rate"];
-			if ((rate > -10) && (rate < 10)) { vsParse.rate = rate;fail = false; }
-		}
-
-		if ("MAS" == matchedPin["mode"]) {
-			vsParse.deviceType = DEVICE_MAS;
-			//expect the MASarray to be 64chars each should be 0-9 A-F
-			std::string MASarray = matchedPin["MASarray"];
-
-			Serial.printf("MASarray in %s\n", MASarray.c_str());  //debug
-
-			//lamda function
-			bool is_valid = std::all_of(MASarray.begin(), MASarray.end(), [](unsigned char c) {
-				return std::isxdigit(c);
-				});
-
-			if ((MASarray.size() == 64) && is_valid) {
-				//need to parse the hex chars into array of uint8
-
-				for (int i = 0;i < 32;i++) {
-					//advance through MSarray two hex chrs at a time and convert to uint8_t
-					vsParse.aspectParameters[i] = std::stoi(MASarray.substr(i * 2, 2), nullptr, 16);
-				}
-				fail = false;
-			}
-		}
-
-		if ("Aspect"== matchedPin["mode"]) { vsParse.deviceType = DEVICE_ASPECT;fail = false; }
-		if ("Sensor"== matchedPin["mode"]) { vsParse.deviceType = DEVICE_SENSOR;fail = false; }
-		if ("SensorW"== matchedPin["mode"]) { vsParse.deviceType = DEVICE_SENSOR_WPU;fail = false; }
-
-		//any other modes such as I2C or interstitial states are ignored and leave fail=true
-		if (!fail) {
-			//all modes, update dcc address and boolean fields
-			//sending a string or neg number will result in addr 0 which disables that pin
-			uint16_t addr = matchedPin["addr"];
-			if (addr > 2048) fail = true;
-			vsParse.address = addr;
-			vsParse.invert = matchedPin["invert"];
-			vsParse.continuous = matchedPin["cont"];
-		}
-
-		//if validation passes, we write back
-		if (!fail) {
-			vs = vsParse;
-			bootController.isDirty = true;
-			eePutSettings();
-		}
-		Serial.printf("pin update %d result=%d\n", vs.pin, fail);
-
-	};
-
-
-	//Lambda function to generate output. use &vs to save creating a copy of vs on every call
-	//and use &pins in the [] capture, so that we can build this out in doc
-	auto localHelperOutput = [&pins](VIRTUALSERVO& vs) {
-			
-		// Add a "pin" object
-		const std::string devType[6] = { "Servo","Aspect","MAS","SensorW","Sensor","I2C" };
-		const std::string servoState[13] = { "Neutral","x","Thrown","x","Closed","x","Thrown","Closed","MAS","High","Low","x","x" };
-		JsonObject pin = pins.add<JsonObject>();
-		
-		if (vs.deviceType<size(devType)) pin["mode"] = devType[vs.deviceType];
-		pin["pin"] = vs.pin;
-		pin["addr"] = vs.address;
-		pin["invert"] = vs.invert;
-		pin["cont"] = vs.continuous;
-		pin["swing"] = vs.swing;
-		pin["rate"] = vs.rate;
-		//pin["notSupported"] = vs.ignorePowerParameter;
-
-		pin["MASstate"] = vs.MASstate;  //vs.state
-		if (vs.state<size(servoState)) pin["state"] = servoState[vs.state];
-				
-		//vs.aspectParameters is a 32 byte array. we convert it here to a hex string of 64 char
-		char buffer[70];
-		char* ptr = buffer;
-		for (int i = 0;i < sizeof(vs.aspectParameters);i++) {
-			//we know we are creating 2 chars with a trailling null
-			//and we know 70 chars is sufficient without need to track end of buffer, hence use 3
-			snprintf(ptr, 3, "%02X", vs.aspectParameters[i]);
-			ptr += 2;
-		}
-		pin["MASarray"] = buffer;
-
-		};//end lambda
-
-
-	//DO THE PROCESSING
-	if ("write" == doc["action"]) {
-		if ("bank0" == doc["page"]) { for (auto& vs : virtualservoCollection) { localHelperIn(vs); } };
-		if ("bank1" == doc["page"]) { for (auto& vs : virtualservoCollectionBank1) { localHelperIn(vs); } };
-		if ("bank2" == doc["page"]) { for (auto& vs : virtualservoCollectionBank2) { localHelperIn(vs); } };
-	}
-
-	//then whether write or poll, we roll into returning the updated out object		
-	//Caution: bad eeprom values will cause a crash if they are outside of the arrabounds when used as an index. test them.
-	//also after calling the helper and sending data you need to clear pins array by redeclaring it.
-	//JsonArray pins = out["pins"].to<JsonArray>();  do not use .clear() as you will cause a memory leak
-	
-//	WARNING: ESP8266 TCP frame size is 1460 bytes max.  Sending 7+ pins will usually exceed this causing the websocket
-	//transmission to cut short, trigger an error on the client and reset the websocket.  To ensure reliably operation
-	//never transmit more than 6 pins at a time.
-	
-
-
-	if ("bank0" == doc["page"]) {
-		for (uint8_t r = 0;r < 5;r++) {	localHelperOutput(virtualservoCollection[r]);}
-		sendJson(out);
-		JsonArray pins = out["pins"].to<JsonArray>();
-		for (uint8_t r = 5;r < 10;r++) {localHelperOutput(virtualservoCollection[r]);}
-	}
-
-	if ("bank1" == doc["page"]) {
-		for (uint8_t r = 0;r < 5;r++) {	localHelperOutput(virtualservoCollectionBank1[r]);}
-		sendJson(out);
-		JsonArray pins = out["pins"].to<JsonArray>();
-		for (uint8_t r = 5;r < 10;r++) {localHelperOutput(virtualservoCollectionBank1[r]);}
-		sendJson(out);
-		pins = out["pins"].to<JsonArray>();
-		for (uint8_t r = 10;r < 16;r++) { localHelperOutput(virtualservoCollectionBank1[r]); }
-
-	}
-
-	if ("bank2" == doc["page"]) {
-		for (uint8_t r = 0;r < 5;r++) { localHelperOutput(virtualservoCollectionBank2[r]); }
-		sendJson(out);
-		JsonArray pins = out["pins"].to<JsonArray>();
-		for (uint8_t r = 5;r < 10;r++) { localHelperOutput(virtualservoCollectionBank2[r]); }
-		sendJson(out);
-		pins = out["pins"].to<JsonArray>();
-		for (uint8_t r = 10;r < 16;r++) { localHelperOutput(virtualservoCollectionBank2[r]); }
-	}
-			
-	sendJson(out);
-}
-*/
-
-void nsACCweb::processBank(JsonDocument& doc) {
-	//AI fixed code.  note that not all arduino compilers support std::size(something) so it has used literal sizes.
+	//Not all arduino compilers support std::size(something) so we use const size_t and define them.
 	
 	using namespace nsESPaccessory;
 
@@ -589,7 +410,7 @@ void nsACCweb::processBank(JsonDocument& doc) {
 
 	// Actions are poll|write
 
-	// I come from the lambda down under. Define a lambda routine to process changes passed up in [doc]
+	// I come from the lambda down under. Define lambda routine to process changes passed up in [doc]
 	auto localHelperIn = [doc](VIRTUALSERVO& vs) {
 		bool fail = true;
 		VIRTUALSERVO vsParse = vs;
@@ -675,9 +496,7 @@ void nsACCweb::processBank(JsonDocument& doc) {
 		pin["cont"] = vs.continuous;
 		pin["swing"] = vs.swing;
 		pin["rate"] = vs.rate;
-
 		pin["MASstate"] = vs.MASstate;
-		pin["w"] = vs.state;
 		if (vs.state < servoStateSize) pin["state"] = servoState[vs.state];
 
 		char buffer[70];
@@ -732,13 +551,6 @@ void nsACCweb::processBank(JsonDocument& doc) {
 
 
 
-
-
-
-
-
-
-
 /// <summary>
 /// Send websocket giving status updates to all banks.  Call this after processing a turnout or MAS command, or a sensor change.
 /// </summary>
@@ -779,6 +591,85 @@ void nsACCweb::sendState(void) {
 
 }
 
+/// <summary>
+/// deals with incoming websocket command.  Commands must start with Ucase
+/// </summary>
+void nsACCweb::processCommand(JsonDocument& doc) {
+	using namespace nsESPaccessory;
+	if (doc["page"] == nullptr) return;
+	if (doc["action"] == nullptr) return;
+	if (doc["action"] != "command") return;
+	
+	//find pins, and action them.
+	auto localHelperCommand = [doc](VIRTUALSERVO& vs) {
+		// Directly assign the array reference
+		JsonArrayConst pinsArray = doc["pins"];
+
+		// Loop through to find pin using modern V7 syntax
+		JsonObjectConst matchedPin;
+
+		for (JsonObjectConst item : pinsArray) {
+			if (item["pin"].is<int>() && item["pin"].as<int>() == vs.pin) {
+				matchedPin = item;
+				break;
+			}
+		}
+		
+		if (matchedPin.isNull()) return;
+		Serial.printf("processCommand pin %d \n", vs.pin);
+
+		//commands are only valid on servos
+		if(vs.deviceType != DEVICE_SERVO) return;
+
+		switch (vs.state) {
+		case SERVO_TO_THROWN:
+		case SERVO_THROWN:
+		case SERVO_NEUTRAL:
+			//move to closed if command was toggle, else if command was Closed
+			//note that toggle will cause a neutral servo to move to closed.
+			if (("Toggle" == matchedPin["command"]) || ("Closed" == matchedPin["command"])) {
+				vs.state = SERVO_TO_CLOSED;
+			};
+			
+			//also send state update over Loconet, but not for neutral
+			Serial.println("sendState to Loconet");  //debug
+			nsLOCONETaccessoryProcessor::turnoutEvent(vs.address, (vs.state == SERVO_TO_THROWN));
+			if ("Neutral" == matchedPin["command"]) vs.state = SERVO_NEUTRAL;
+
+			break;
+		case SERVO_TO_CLOSED:
+		case SERVO_CLOSED:
+				//move to thrown if command was toggle, else if command was Thrown
+			if (("Toggle" == matchedPin["command"]) || ("Thrown" == matchedPin["command"])) {
+					vs.state = SERVO_TO_THROWN;
+			};
+			
+			//also send state update over Loconet, but not for neutral
+			nsLOCONETaccessoryProcessor::turnoutEvent(vs.address, (vs.state == SERVO_TO_THROWN));
+			if ("Neutral" == matchedPin["command"]) vs.state = SERVO_NEUTRAL;
+			
+			
+			break;
+
+		}
+	};  //end lambda
+
+	//execute the command on the relevant bank
+	if ("bank0" == doc["page"]) {
+		for (auto& vs : virtualservoCollection) { localHelperCommand(vs); }
+	}
+	if ("bank1" == doc["page"]) {
+		for (auto& vs : virtualservoCollectionBank1) { localHelperCommand(vs); }
+	}
+	if ("bank2" == doc["page"]) {
+		for (auto& vs : virtualservoCollectionBank2	) { localHelperCommand(vs); }
+	}
+
+
+	//send a state update to the websocket clients
+	sendState();
+
+}
 
 
 

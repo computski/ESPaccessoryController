@@ -55,7 +55,7 @@ namespace nsLOCONETaccessoryProcessor {
 	void sensorEvent(uint16_t address, int8_t event);
 	void commandTurnout(int16_t addr, bool thrown);
 	void commandMAS(int16_t addr, uint8_t state);
-
+	void turnoutEvent(uint16_t address, bool isThrown);
 	
 }
 

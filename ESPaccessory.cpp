@@ -1,4 +1,13 @@
 
+
+/*2026-10-12 still has some bugs.  the serverDefaults etc need to set bank0|1|2 and we need to use bank0 to handle special
+* treatment of A0 and block setting sensor type on bank 1|2
+
+the boot routine causes a crash on bank2 if any element is an aspect.  i dunno if this is because bank2 is corrupt or some
+other reason.
+*/
+
+
 /*
 * 2026-10-5 status, given that we built a web page interface
 * >seems that if unit cannot connect to LocoNet, it retries too rapidly and causes a WDT reset.  We need to slow down the retry rate.
@@ -262,6 +271,74 @@ void nsESPaccessory::ESPaccessorySetup() {
 
 	verbose = false;
 	eeGetSettings();
+
+	//2026-10-12 new block, we run I2C tests and determine now whether we can boot the PCA modules if present
+	//if you use PCA.begin and there is no PCA device, the PCA library will crash the device.
+
+	if (bootController.hasPCA9685modules) {
+		//initialise Wire on bank0, D4 (SDA) and D5 (SCL)
+		//D0 is an RTC pin and does not work with Wire.
+		Wire.begin(NodeMCUmap[4], NodeMCUmap[5]);  //sda,scl
+		Wire.setClock(400000);
+
+		//vsc[4].deviceType = DEVICE_I2C;   //dealt with inside boot
+		//vsc[5].deviceType = DEVICE_I2C;
+
+		/*I2C device scan*/
+		byte error, address;
+		int nDevices;
+
+		Serial.println(F("I2C scanning..."));
+		nDevices = 0;
+		for (address = 1; address < 127; ++address)
+		{
+			// The i2c_scanner uses the return value of Write.endTransmisstion
+			// to confirm an device is at the address
+			Wire.beginTransmission(address);
+			error = Wire.endTransmission();
+
+			if (error == 0)
+			{
+				Serial.print("I2C device found at address 0x");
+				if (address < 16)
+					Serial.print("0");
+				Serial.print(address, HEX);
+				Serial.println(" !");
+				++nDevices;
+			}
+			else if (error == 4)
+			{
+				Serial.print(F("Unknown error at address 0x"));
+				if (address < 16)
+					Serial.print("0");
+				Serial.println(address, HEX);
+			}
+		}
+
+		if (nDevices == 0) {
+			Serial.println(F("No I2C devices found\n"));
+			//disable any calls to the PCA modules because the PCA library will cause a hang and a WDT crash
+			bootController.hasPCA9685modules = false;
+		}
+		else {
+			if (bootController.hasPCA9685modules) {
+				//IMPORTANT: Wire must be started before calling pwm.begin, and if no PCA devices are present
+				//the PWM libary will cause a WDT timeout
+				PCAbank1.begin();
+				PCAbank1.setPWMFreq(50);
+				delay(10);
+				PCAbank2.begin();
+				PCAbank2.setPWMFreq(50);
+				Serial.println(F("boot PCA modules"));
+			}
+		}
+
+	}
+
+	bootVirtualServo();
+
+
+
 	
 	
 //used for debug.  Will output a hi pulse on D8 at the start of the 15mS PWM pulse interval and goes low again when all processing
@@ -2176,7 +2253,7 @@ int8_t nsESPaccessory::getSensorState(int16_t addr) {
 
 const int EEOFFSET = 192;
 
-
+/*
 /// <summary>
 /// If booting a new system, set virtual servos to their default settings
 /// </summary>
@@ -2212,11 +2289,107 @@ void setVirtualServoDefaults(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAban
 	//debug
 	//Serial.printf("total pins %d\n", totalPins);
 }
+*/
+
+
+/// <summary>
+/// set virtual server bank defaults
+/// </summary>
+void nsESPaccessory::setVirtualServoDefaults(void) {
+	
+	auto localHelper = [](VIRTUALSERVO& vs,uint8_t bank) {
+		static uint8_t p;
+		static uint8_t lastBank = 99;
+		if (bank != lastBank) {
+			//reset pin count
+			p = 0;
+			lastBank = bank;
+		}
+		
+		//initialise the pin assignments move all servos and aspects to closed position
+			vs.bank = bank;
+			vs.pin = p;
+			vs.invert = 0;
+			vs.position = 90;
+			vs.swing = 25;
+			vs.continuous = 0;
+			vs.state = SERVO_BOOT;
+			vs.power = false;
+			vs.ignorePowerParameter = true;
+			vs.deviceType = DEVICE_SERVO;
+			vs.rate = 0;
+			memset(vs.aspectParameters, MAS_EMPTY_VAL, 4 * ASPECT_PARAMETER_SIZE * sizeof(int8_t));
+			//special case for virtual pin 9 of the Bank 0 ESP servo array, set this as a sensor
+			if ((0==bank) && (9==p)) 	vs.deviceType = DEVICE_SENSOR;
+	p++;
+
+	};
+
+	//initialise each bank
+	for (auto& vs : virtualservoCollection) { localHelper(vs, 0 ); };
+	for (auto& vs : virtualservoCollectionBank1) { localHelper(vs, 1); };
+	for (auto& vs : virtualservoCollectionBank2) { localHelper(vs, 2); };
+
+}
+
+
+
+/// <summary>
+/// set virtual servos at boot.
+/// I2C tests must be done before calling this function
+/// </summary>
+void nsESPaccessory::bootVirtualServo(void) {
+	auto localHelper = [](VIRTUALSERVO& vs, uint8_t bank) {
+		static uint8_t p;
+		static uint8_t lastBank = 99;
+		if (bank != lastBank) {
+			//reset pin count
+			p = 0;
+			lastBank = bank;
+		}
+
+			vs.bank = bank;
+			vs.pin = p;
+			vs.state = SERVO_BOOT;
+
+			//special case on bank0, set certain pins as I2C
+			if ((0 == bank) && bootController.hasPCA9685modules){
+				if (4 == p) vs.deviceType = DEVICE_I2C;
+				if (5 == p) vs.deviceType = DEVICE_I2C;
+			}
+
+			vs.timeDelay = 0;
+			vs.MASstate = 127;
+			//vs.position = 90;  //neutral
+			//minimum useful swing is 5 degrees, max is 90
+			if ((vs.swing < 5) || (vs.swing > 90)) vs.swing = 5;
+
+			//calculate closed posn (we may be inverted) then back off 5 degrees and set that as posn
+			if (vs.invert) {
+				//max position
+				vs.position = 90 + vs.swing - 5;
+			}
+			else {
+				//min position, normal for closed
+				vs.position = 90 - vs.swing + 5;
+			}
+
+			p++;
+	};
+
+	//initialise each bank
+	for (auto& vs : virtualservoCollection) { localHelper(vs, 0); };
+	for (auto& vs : virtualservoCollectionBank1) { localHelper(vs, 1); };
+	for (auto& vs : virtualservoCollectionBank2) { localHelper(vs, 2); };
+
+}
 
 
 
 
 
+
+/*
 /// <summary>
 /// boot a virtual servo on power up from its programmed settings
 /// </summary>
@@ -2231,7 +2404,7 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 		vs.timeDelay = 0;
 		vs.MASstate = 127;
 		//vs.position = 90;  //neutral
-		/*minimum useful swing is 5 degrees*/
+		//minimum useful swing is 5 degrees
 		if ((vs.swing < 5) || (vs.swing > 90)) vs.swing = 5;
 
 		//calculate closed posn (we may be inverted) then back off 5 degrees and set that as posn
@@ -2259,7 +2432,7 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 		vsc[4].deviceType = DEVICE_I2C;
 		vsc[5].deviceType = DEVICE_I2C;
 
-		/*I2C device scan*/
+		//I2C device scan
 		byte error, address;
 		int nDevices;
 
@@ -2310,13 +2483,13 @@ void bootVirtualServo(VIRTUALSERVO vsc[], uint8_t pinCount, bool isPCAbank) {
 		//there's no means to check a device is a PCA device as these do not have ID codes
 	}
 }
-
+*/
 
 
 
 /// <summary>
 /// restores settings from EEPROM. If the software version has changed, we overwrite the eeprom with defaults
-/// we also need to clear certain values on boot. max EEPROM we can use is 4096
+/// max EEPROM we can use is 4096
 /// </summary>
 void eeGetSettings(void) {
 	CONTROLLER defaultController;  //grab defaults
@@ -2334,9 +2507,11 @@ void eeGetSettings(void) {
 		eeAddr = EEOFFSET; //bug fix
 		
 		//set defaults for all virtual servo groups
-		setVirtualServoDefaults(virtualservoCollection, 10, false);
-		setVirtualServoDefaults(virtualservoCollectionBank1, 16, true);
-		setVirtualServoDefaults(virtualservoCollectionBank2, 16, true);
+		//setVirtualServoDefaults(virtualservoCollection, 10, false);
+		//setVirtualServoDefaults(virtualservoCollectionBank1, 16, true);
+		//setVirtualServoDefaults(virtualservoCollectionBank2, 16, true);
+
+		setVirtualServoDefaults();
 
 		/*write back default values*/
 		EEPROM.put(eeAddr, virtualservoCollection);
@@ -2365,21 +2540,18 @@ void eeGetSettings(void) {
 		Serial.println(eeAddr, DEC);
 		bankSelect = 0;  //select bank 0 on startup
 
+		//2026-10-12 intial servo states and positions are handled in bootVirtualServo()
+		
 		//initialise the pin assignments move all servos and aspects to closed position
-				
-		bootVirtualServo(virtualservoCollection, 10,false);
-		bootVirtualServo(virtualservoCollectionBank1, 16, true);
-		bootVirtualServo(virtualservoCollectionBank2, 16, true);
+		//bootVirtualServo(virtualservoCollection, 10,false);
+		//bootVirtualServo(virtualservoCollectionBank1, 16, true);
+		//bootVirtualServo(virtualservoCollectionBank2, 16, true);
 			
-
-		//2026-04-05 for some reason bootVS means we no longer see the boot 0,1,2,3 etc messages
-		//how nothing to do with PCA because I am not calling setVSD
 
 		Serial.print(F("\nsofware version "));
 		Serial.println(bootController.softwareVersion, DEC);
 		if (factory) Serial.println(F("factory reset"));
-		Serial.printf("CPU freq %d\n", esp_get_cpu_freq_mhz());
-
+		
 }
 
 
@@ -2898,7 +3070,7 @@ void processServoOLD(void) {
 			//if (vs.deviceType == DEVICE_SERVO) PCAservoWrite(&vs, activeBank,true);
 
 		}
-
+		
 	} //for loop
 
 #ifdef SYNC_PULSE
@@ -2922,6 +3094,11 @@ void processServoOLD(void) {
 
 
 }//end function
+
+
+
+//2026-10-12 there's a bug in here, if you write Aspect to bank 2 it will cause a crash on boot.  why? and why not bank1?
+//also we are not testing vs.bank when looking at A0
 
 /// <summary>
 /// PROCESS SERVO POSITIONS AND SIGNAL ASPECTS.  Call every 15mS from a timer.
@@ -2960,6 +3137,8 @@ void processServo(void) {
 	*/
 
 
+	//2026-10-12 there's a bug for bank1|2 that means ASPECT causes a crash when it boots
+	//fixed: we need to test bootController.hasPCA9685modules
 	
 	auto servoHelper = [](VIRTUALSERVO& vs,int8_t activeBank) {
 
@@ -3063,10 +3242,12 @@ void processServo(void) {
 				}
 				break;
 			case 1:
+				if (!bootController.hasPCA9685modules) break;
 				PCAbank1.setPin(vs.pin, 0, vs.invert);
 				break;
 
 			case 2:
+				if (!bootController.hasPCA9685modules) break;
 				PCAbank2.setPin(vs.pin, 0, vs.invert);
 				break;
 			}
@@ -3088,11 +3269,13 @@ void processServo(void) {
 			case 1:
 				//PCA devices do not support tri state, so the vs.power parameter is to be ignored.  We have to drive active high or low
 				//strictly we don't need to keep updating .setPWM but we'd need a flag to keep track of at least one write
+				if (!bootController.hasPCA9685modules) break;
 				PCAbank1.setPin(vs.pin, 4095, vs.invert);
 				break;
 
 			case 2:
-				PCAbank1.setPin(vs.pin, 4095, vs.invert);
+				if (!bootController.hasPCA9685modules) break;
+				PCAbank2.setPin(vs.pin, 4095, vs.invert);
 				break;
 			}
 			break;
