@@ -411,7 +411,7 @@ void nsACCweb::processBank(JsonDocument& doc) {
 	// Actions are poll|write
 
 	// I come from the lambda down under. Define lambda routine to process changes passed up in [doc]
-	auto localHelperIn = [doc](VIRTUALSERVO& vs) {
+	auto localHelperWrite = [doc](VIRTUALSERVO& vs) {
 		bool fail = true;
 		VIRTUALSERVO vsParse = vs;
 
@@ -430,9 +430,10 @@ void nsACCweb::processBank(JsonDocument& doc) {
 
 		// Exit now if no match
 		if (matchedPin.isNull()) return;
-
+		// Safe extraction with empty fallback.  const char* modeStr = matchedPin["mode"] | ""; 
+		
 		// Parse device-specific fields
-		if ("Servo" == matchedPin["mode"]) {
+		if ( "Servo"== matchedPin["mode"]){
 			vsParse.deviceType = DEVICE_SERVO;
 			uint8_t swing = matchedPin["swing"];
 			if (swing < 91) { vsParse.swing = swing; fail = false; }
@@ -459,9 +460,19 @@ void nsACCweb::processBank(JsonDocument& doc) {
 			}
 		}
 
-		if ("Aspect" == matchedPin["mode"]) { vsParse.deviceType = DEVICE_ASPECT; fail = false; }
-		if ("Sensor" == matchedPin["mode"]) { vsParse.deviceType = DEVICE_SENSOR; fail = false; }
-		if ("SensorW" == matchedPin["mode"]) { vsParse.deviceType = DEVICE_SENSOR_WPU; fail = false; }
+		
+		if ("SensorW" == matchedPin["mode"]) {
+			vsParse.deviceType = DEVICE_SENSOR_WPU;
+			fail = false;
+		}
+		else if ("Sensor" == matchedPin["mode"]) {
+			vsParse.deviceType = DEVICE_SENSOR;
+			fail = false;
+		}
+		else if ("Aspect" == matchedPin["mode"]) {
+			vsParse.deviceType = DEVICE_ASPECT;
+			fail = false;
+		}
 
 		if (!fail) {
 			uint16_t addr = matchedPin["addr"];
@@ -483,8 +494,8 @@ void nsACCweb::processBank(JsonDocument& doc) {
 		//not all compilers support std::size(something)
 		const size_t devTypeSize = 6;
 		const size_t servoStateSize = 13;
-
-		const std::string devType[devTypeSize] = { "Servo","Aspect","MAS","SensorW","Sensor","I2C" };
+		//make sure the array matches the enum order!!
+		const std::string devType[devTypeSize] = { "Servo","Aspect","MAS","Sensor","SensorW","I2C" };
 		//note servos have interstitial states such as servo-to-thrown.  Report these as thrown|closed because that is the ultimate state.
 		const std::string servoState[servoStateSize] = { "Neutral","Thrown","Thrown","Closed","Closed","x","Thrown","Closed","MAS","High","Low","x","x" };
 		JsonObject pin = pins.add<JsonObject>();
@@ -510,9 +521,9 @@ void nsACCweb::processBank(JsonDocument& doc) {
 
 	//DO THE PROCESSING
 	if ("write" == doc["action"]) {
-		if ("bank0" == doc["page"]) { for (auto& vs : virtualservoCollection) { localHelperIn(vs); } }
-		if ("bank1" == doc["page"]) { for (auto& vs : virtualservoCollectionBank1) { localHelperIn(vs); } }
-		if ("bank2" == doc["page"]) { for (auto& vs : virtualservoCollectionBank2) { localHelperIn(vs); } }
+		if ("bank0" == doc["page"]) { for (auto& vs : virtualservoCollection) { localHelperWrite(vs); } }
+		if ("bank1" == doc["page"]) { for (auto& vs : virtualservoCollectionBank1) { localHelperWrite(vs); } }
+		if ("bank2" == doc["page"]) { for (auto& vs : virtualservoCollectionBank2) { localHelperWrite(vs); } }
 		eePutSettings();
 	}
 
