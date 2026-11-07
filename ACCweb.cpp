@@ -6,9 +6,15 @@
 #include "ESPaccessory.h"
 #include <ESP8266mDNS.h>
 
+
 /*ESP8266WebServer replaced with AsyncWebServer which is more robust.  The ESP8266WebServer library has a bug in the streamFile() function 
 that causes it to fail when serving files larger than 21kb.  The AsyncWebServer library does not have this limitation and can serve larger files without issues.
-The AsyncWebServer library also has better performance and can handle multiple connections more efficiently.  It also handles content types automatically*/
+The AsyncWebServer library also has better performance and can handle multiple connections more efficiently.  It also handles content types automatically
+
+mDNS is used to advertise this device e.g. ACC_ESP.local but we cannot reliably resolve the laptop hosting the JRMI app through the laptop name.
+This is because the mDNS library has some limitations (cause crashes) and also Windows by default turns off network discovery and this can only be enabled
+on a private netowrk.  So rather than force the user to weaken their laptop security, instead we have to know the laptop IP address.
+*/
 
 
 
@@ -49,7 +55,7 @@ void getHardware(AsyncWebServerRequest* request) {
 	doc["hasPCA"] = nsESPaccessory::bootController.hasPCA9685modules;
 	doc["heap"] = ESP.getFreeHeap();
 	
-
+	
 	//We can avoid a String class, but need to guesstimate a useful buffer size
 	char jsonChar[512];
 	serializeJsonPretty(doc, jsonChar, sizeof(jsonChar));
@@ -704,3 +710,94 @@ std::string nsACCweb::getWsUri() {
 	return wsUri;
 }
 #pragma endregion
+
+
+void nsACCweb::discoverMyLaptop() {
+	Serial.println("Scanning local network for laptop services...");
+
+	// Query for devices broadcasting an HTTP service ('http' over 'tcp')
+	int n = MDNS.queryService("dcc_esp", "tcp");  //we are looking for the service name "dcc_esp" over TCP
+
+	if (n == 0) {
+		Serial.println("No services found. Is the laptop advertising?");
+	}
+	else {
+		Serial.printf("%d service(s) found:\n", n);
+		for (int i = 0; i < n; ++i) {
+			// Check if this is your laptop (by hostname or service instance name)
+			Serial.print(i + 1);
+			Serial.print(": Hostname: ");
+			Serial.print(MDNS.hostname(i));
+			Serial.print(" | IP Address: ");
+			Serial.print(MDNS.IP(i).toString());
+			Serial.print(" | Port: ");
+			Serial.println(MDNS.port(i));
+
+			// OPTIONAL: If the hostname contains your laptop name, target it
+			if (MDNS.hostname(i).indexOf("your-laptop-name") >= 0) {
+				IPAddress laptopIP = MDNS.IP(i);
+				Serial.print(">>> Found your laptop explicitly at IP: ");
+				Serial.println(laptopIP);
+				// You can now use 'laptopIP' to send your sensor data/requests!
+			}
+		}
+	}
+}
+
+void nsACCweb::discoverMyLaptopAlt() {
+	//COOL.  This works.  we can discover the JRMI service on the laptop along with its IP and port.
+	//we will add a checkbox "auto discover JRMI".  and also need to add a "connected" indicator
+	//the user also has the option to manually enter dcc_esp as the host
+
+
+	//_loconetovertcpserver._tcp.local
+	//JRMI advertises this.  which is exactly what we want to discover.
+	Serial.println("Scanning for jrmi");
+	// Query for devices broadcasting an HTTP service ('http' over 'tcp')
+	// Look for "_loconetovertcpserver._tcp.local."
+	int n = MDNS.queryService("loconetovertcpserver", "tcp");
+
+	if (n == 0) {
+		Serial.println("not found");
+	}
+	else {
+		Serial.printf("%d service(s) found:\n", n);
+		for (int i = 0; i < n; ++i) {
+			// Check if this is your laptop (by hostname or service instance name)
+			Serial.print(i + 1);
+			Serial.print(": Hostname: ");
+			Serial.print(MDNS.hostname(i));
+			Serial.print(" | IP Address: ");
+			Serial.print(MDNS.IP(i).toString());
+			Serial.print(" | Port: ");
+			Serial.println(MDNS.port(i));
+						
+		}
+	}
+
+
+	/*
+	// Replace with your EXACT Windows Computer Name (Case-insensitive, NO ".local")
+	const char* laptop_hostname = "HP-Ultra-5";
+
+	IPAddress laptopIP;
+	Serial.printf("Asking router DNS to resolve: %s\n", laptop_hostname);
+
+	// Standard DNS lookup through your router
+	int result = WiFi.hostByName(laptop_hostname, laptopIP);
+
+	if (result == 1) {
+		Serial.print("Success! Laptop IP Address: ");
+		Serial.println(laptopIP);
+	}
+	else {
+		Serial.println("Router DNS could not resolve the hostname.");
+	}
+
+	
+	Its too hard to find the laptop reliably.  so unfortunatley you need to reserve DNS your laptop on your router and then use this IP.
+	manually entering it into the loconet ip on the acc_esp.  ideally i wanted to just enter the laptop name as a string.
+	
+	*/
+
+}

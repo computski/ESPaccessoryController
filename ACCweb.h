@@ -41,6 +41,9 @@ namespace nsACCweb {
 	void processCommand(JsonDocument& doc);
 	
 	std::string getWsUri();
+
+	void discoverMyLaptop();
+	void discoverMyLaptopAlt();
 }
 
 #endif

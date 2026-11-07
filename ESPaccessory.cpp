@@ -826,6 +826,15 @@ void checkSerial(void) {
 
 		}
 
+		if (SerialBuffer[0] == 'J') {
+			nsACCweb::discoverMyLaptop();
+		}
+
+		if (SerialBuffer[0] == 'K') {
+			nsACCweb::discoverMyLaptopAlt();
+		}
+
+
 		if (SerialBuffer[0] == 'G') {
 		//set mDNS name
 			i = 0;
