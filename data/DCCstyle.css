@@ -18,6 +18,16 @@
             visibility: hidden;
         }
 
+	.btnLock {
+		background: none;
+  		border: none;
+  		padding: 0;
+  		margin: 0;
+ 		pointer-events: none;  /* Blocks clicks, hovers, and active states */
+  		cursor: default;       /* Keeps the text cursor normal */
+  		user-select: text; 
+	}
+
 .shim {
 	padding-top:1vw;
 }

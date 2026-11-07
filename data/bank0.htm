@@ -8,11 +8,11 @@
    
 <!-- wsUri is now given to us as a json variable via a call to /hardware-->
 
-    <!--updated 2026-09-27-->
+    <!--updated 2026-10-07-->
    
 
     <script type="text/javascript">
-      //let wsUri = "wss://echo.websocket.org/";  //test mode only
+     //let wsUri = "wss://echo.websocket.org/";  //test mode only
       let wsUri = "ws://192.168.6.1/ws";
       let ws;
 
@@ -24,7 +24,7 @@
 
 let bank = { page: "bank0", action: "poll", pins:[{pin:0},{pin:1},{pin:2},{pin:3},{pin:4},{pin:5},{pin:6},{pin:7},{pin:8},{pin:9}]};
 let bankWrite = { "page": "bank0", "action": "write", pins:[]};
-let hardware = {"wsUri":"ws://192.168.6.1:81/"};
+let hardware = {"wsUri":"ws://192.168.6.1/ws"};
 
         //if action=fail this indicates the changes were not successful and the current settings are returned
 
@@ -246,10 +246,26 @@ inputs[r].value=decodeMAS(bank.pins[r].MASarray,3);
 if (isMAS) {inputs[r].classList.remove('nominal')}else{inputs[r].classList.add('nominal')};
 
 //display state or MASstate or neither
-inputs = document.getElementsByName('state[]');
-inputs[r].innerText=bank.pins[r].state;  //default
-if (isMAS) inputs[r].innerText=bank.pins[r].MASstate;
-if (isSystem) inputs[r].innerText="";
+//inputs = document.getElementsByName('state[]');  
+//inputs[r].innerText=bank.pins[r].state;  //default
+//if (isMAS) inputs[r].innerText=bank.pins[r].MASstate;
+//if (isSystem) inputs[r].innerText="";
+
+inputs = document.getElementsByName('btnState[]');
+//default for sensor,servo, aspect
+inputs[r].value=bank.pins[r].state;
+
+if (isMAS) inputs[r].value=bank.pins[r].MASstate;
+if (isSystem) inputs[r].value="";
+
+//only servos have an action button, else display as text
+if (isServo) {
+inputs[r].classList.remove('btnLock')
+}
+else
+{//sensor | sensor wpu
+inputs[r].classList.add('btnLock')};
+
 
 if (console) console.log("repaint "+r);
 }
@@ -406,6 +422,7 @@ table.addEventListener('input', (event) => {
 
 	//Add the pin to bankWrite (once) if not present, this denotes a pending write
 	const p =cell.parentNode.rowIndex-1;
+//const p =cell.parentNode.sectionRowIndex;   //should correctly be based off zero because this is the <body> section
 	const s  = '{"pin":' + p + '}';
 	const hasPair= bankWrite.pins.some(obj => obj.pin === p );    
 	if (!hasPair) bankWrite.pins.push(JSON.parse(s));
@@ -423,6 +440,46 @@ repaintRow(cell.parentNode.rowIndex-1);
 
 return;
 
+}
+
+
+//e is button this, c is Toggle|Neutral  call onClick="doBtnEvt(event)"
+function doBtnEvt(evt){
+
+const tableRow = evt.target.closest('tr');
+const pinCell = document.getElementsByName('pin[]');
+//pick up p as an integer, not a string
+const p = parseInt(pinCell[tableRow.sectionRowIndex].textContent.trim(), 10); 
+
+bankWrite.pins=[];
+bankWrite.action="command";
+const hasPair= bankWrite.pins.some(obj => obj.pin === p );    
+if (!hasPair) bankWrite.pins.push({pin: p});   //directly push json
+
+//search for p as integer
+const foundObj = bankWrite.pins.find(obj => obj.pin === p);
+if (foundObj === undefined) return;
+
+if (evt.shiftKey){
+foundObj.command="Neutral";  //commands must start Ucase
+
+}else{
+foundObj.command="Toggle"
+
+}
+
+
+
+console.log(bankWrite);  //did this get the pin row added?
+//this works, but its not sufficient to indicate we want 'netural' for example.  we need a pin specific command
+
+let myJSON = JSON.stringify(bankWrite);
+	debug.innerText=myJSON;
+	ws.send(myJSON);
+//clear the .pins array once written. ACC_ESP should broadcast new state
+//a websocket with the new state
+bankWrite.pins=[];
+bankWrite.action="poll";
 }
 
     </script>
@@ -486,7 +543,7 @@ return;
 <td><input type="text" name="MAShF[]" style="width: 8vw"/></td>
 <td><input type="text" name="MASlF[]" style="width: 8vw"/></td>
 
-<td name="state[]"></td>
+<td ><input type="button" name="btnState[]" class="btnLock" onclick="doBtnEvt(event);"/></td>
 </tr>
 
 <tr>
@@ -510,7 +567,7 @@ return;
 <td><input type="text" name="MAShF[]" style="width: 8vw"/></td>
 <td><input type="text" name="MASlF[]" style="width: 8vw"/></td>
 
-<td name="state[]"></td>
+<td ><input type="button" name="btnState[]" class="btnLock" onclick="doBtnEvt(event);"/></td>
 </tr>
 
 </tbody>
@@ -537,12 +594,11 @@ style="padding-top:1vw;
         <p id="debug" style="font-size:2vmin" class="nominal">debug </p>
 Bank 0. These pins are hosted on the ESP8266 device.</br>
 Pin 0 cannot support servo mode but can be used in other modes.</br>
-Pin 9 is represents the A0 analog input.
+Pin 9 is represents the A0 analog input.</br>
+Servo: click button state to toggle between Thrown and Closed.  Shift-click will set Neutral.
 
     </div>
-
-
    
 </body>
         </html >
- 
+   
